@@ -36,12 +36,12 @@
 // #![warn(clippy::all)]
 // #![warn(clippy::pedantic)]
 
+#[cfg(not(feature = "esp-dma"))]
+use embedded_dma::ReadBuffer;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
 #[cfg(feature = "esp-dma")]
 use esp_hal::dma::ReadBuffer;
-#[cfg(not(feature = "esp-dma"))]
-use embedded_dma::ReadBuffer;
 
 pub mod latched;
 pub mod plain;

@@ -81,12 +81,12 @@
 use core::convert::Infallible;
 
 use bitfield::bitfield;
+#[cfg(not(feature = "esp-dma"))]
+use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 #[cfg(feature = "esp-dma")]
 use esp_hal::dma::ReadBuffer;
-#[cfg(not(feature = "esp-dma"))]
-use embedded_dma::ReadBuffer;
 
 use super::Color;
 use super::FrameBuffer;
@@ -406,7 +406,7 @@ impl<
     /// const BITS: u8 = 3; // Color depth (8 brightness levels, 7 frames)
     /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
-    /// 
+    ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// framebuffer.clear();
     /// framebuffer.set_pixel(Point::new(10, 10), Color::RED);
