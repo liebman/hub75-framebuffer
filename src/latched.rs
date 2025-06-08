@@ -650,6 +650,18 @@ mod tests {
     type TestFrameBuffer =
         DmaFrameBuffer<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_BITS, TEST_FRAME_COUNT>;
 
+    // Helper function to get mapped index (works for both column and address indices)
+    fn get_mapped_index(index: usize) -> usize {
+        #[cfg(feature = "esp32")]
+        {
+            map_index(index)
+        }
+        #[cfg(not(feature = "esp32"))]
+        {
+            index
+        }
+    }
+
     #[test]
     fn test_address_construction() {
         let addr = Address::new();
@@ -786,23 +798,17 @@ mod tests {
         for (i, addr) in row.address.iter().enumerate() {
             assert_eq!(addr.addr(), test_addr);
             assert_eq!(addr.pwm_enable(), false);
-
-            #[cfg(not(feature = "esp32"))]
-            {
-                // Without ESP32 mapping, latch should be false only for index 3
-                assert_eq!(addr.latch(), !matches!(i, 3));
-            }
+            // With mapping, we need to check the logical latch behavior
+            let logical_i = get_mapped_index(i);
+            assert_eq!(addr.latch(), !matches!(logical_i, 3));
         }
 
         // Check data entries configuration
         for (i, entry) in row.data.iter().enumerate() {
             assert_eq!(entry.latch(), false);
-
-            #[cfg(not(feature = "esp32"))]
-            {
-                // Output enable should be false only for the last column
-                assert_eq!(entry.output_enable(), i != TEST_COLS - 1);
-            }
+            // Output enable should be false only for the last column
+            let logical_i = get_mapped_index(i);
+            assert_eq!(entry.output_enable(), logical_i != TEST_COLS - 1);
         }
     }
 
@@ -812,22 +818,18 @@ mod tests {
 
         row.set_color0(0, true, false, true);
 
-        #[cfg(not(feature = "esp32"))]
-        {
-            assert_eq!(row.data[0].red1(), true);
-            assert_eq!(row.data[0].grn1(), false);
-            assert_eq!(row.data[0].blu1(), true);
-        }
+        let mapped_col_0 = get_mapped_index(0);
+        assert_eq!(row.data[mapped_col_0].red1(), true);
+        assert_eq!(row.data[mapped_col_0].grn1(), false);
+        assert_eq!(row.data[mapped_col_0].blu1(), true);
 
         // Test another column
         row.set_color0(1, false, true, false);
 
-        #[cfg(not(feature = "esp32"))]
-        {
-            assert_eq!(row.data[1].red1(), false);
-            assert_eq!(row.data[1].grn1(), true);
-            assert_eq!(row.data[1].blu1(), false);
-        }
+        let mapped_col_1 = get_mapped_index(1);
+        assert_eq!(row.data[mapped_col_1].red1(), false);
+        assert_eq!(row.data[mapped_col_1].grn1(), true);
+        assert_eq!(row.data[mapped_col_1].blu1(), false);
     }
 
     #[test]
@@ -836,12 +838,10 @@ mod tests {
 
         row.set_color1(0, true, true, false);
 
-        #[cfg(not(feature = "esp32"))]
-        {
-            assert_eq!(row.data[0].red2(), true);
-            assert_eq!(row.data[0].grn2(), true);
-            assert_eq!(row.data[0].blu2(), false);
-        }
+        let mapped_col_0 = get_mapped_index(0);
+        assert_eq!(row.data[mapped_col_0].red2(), true);
+        assert_eq!(row.data[mapped_col_0].grn2(), true);
+        assert_eq!(row.data[mapped_col_0].blu2(), false);
     }
 
     #[test]
@@ -871,22 +871,18 @@ mod tests {
         // Test setting pixel in upper half (y < NROWS)
         frame.set_pixel(5, 10, true, false, true);
 
-        #[cfg(not(feature = "esp32"))]
-        {
-            assert_eq!(frame.rows[5].data[10].red1(), true);
-            assert_eq!(frame.rows[5].data[10].grn1(), false);
-            assert_eq!(frame.rows[5].data[10].blu1(), true);
-        }
+        let mapped_col_10 = get_mapped_index(10);
+        assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
 
         // Test setting pixel in lower half (y >= NROWS)
         frame.set_pixel(TEST_NROWS + 5, 15, false, true, false);
 
-        #[cfg(not(feature = "esp32"))]
-        {
-            assert_eq!(frame.rows[5].data[15].red2(), false);
-            assert_eq!(frame.rows[5].data[15].grn2(), true);
-            assert_eq!(frame.rows[5].data[15].blu2(), false);
-        }
+        let mapped_col_15 = get_mapped_index(15);
+        assert_eq!(frame.rows[5].data[mapped_col_15].red2(), false);
+        assert_eq!(frame.rows[5].data[mapped_col_15].grn2(), true);
+        assert_eq!(frame.rows[5].data[mapped_col_15].blu2(), false);
     }
 
     #[test]
@@ -989,15 +985,11 @@ mod tests {
         // Frames represent thresholds: 32, 64, 96, 128, 160, 192, 224
         // Red value 255 should activate all frames
         for frame in &fb.frames {
-            #[cfg(not(feature = "esp32"))]
-            {
-                // Check upper half pixel
-                if 5 < TEST_NROWS {
-                    assert_eq!(frame.rows[5].data[10].red1(), true);
-                    assert_eq!(frame.rows[5].data[10].grn1(), false);
-                    assert_eq!(frame.rows[5].data[10].blu1(), false);
-                }
-            }
+            // Check upper half pixel
+            let mapped_col_10 = get_mapped_index(10);
+            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
+            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
+            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), false);
         }
     }
 
@@ -1019,10 +1011,8 @@ mod tests {
             let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
             let should_be_active = test_brightness >= frame_threshold;
 
-            #[cfg(not(feature = "esp32"))]
-            {
-                assert_eq!(frame.rows[0].data[0].red1(), should_be_active);
-            }
+            let mapped_col_0 = get_mapped_index(0);
+            assert_eq!(frame.rows[0].data[mapped_col_0].red1(), should_be_active);
         }
     }
 
@@ -1086,21 +1076,9 @@ mod tests {
         let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
         let first_frame_threshold = brightness_step; // 32
 
-        // Helper function to get mapped column index
-        let get_col_index = |col: usize| -> usize {
-            #[cfg(feature = "esp32")]
-            {
-                map_index(col)
-            }
-            #[cfg(not(feature = "esp32"))]
-            {
-                col
-            }
-        };
-
         // Test upper half pixels (color0)
         // Red pixel at (5, 2) - should be red in first frame
-        let col_idx = get_col_index(5);
+        let col_idx = get_mapped_index(5);
         assert_eq!(
             first_frame.rows[2].data[col_idx].red1(),
             Color::RED.r() >= first_frame_threshold
@@ -1115,7 +1093,7 @@ mod tests {
         );
 
         // Green pixel at (10, 5) - should be green in first frame
-        let col_idx = get_col_index(10);
+        let col_idx = get_mapped_index(10);
         assert_eq!(
             first_frame.rows[5].data[col_idx].red1(),
             Color::GREEN.r() >= first_frame_threshold
@@ -1130,7 +1108,7 @@ mod tests {
         );
 
         // Blue pixel at (15, 8) - should be blue in first frame
-        let col_idx = get_col_index(15);
+        let col_idx = get_mapped_index(15);
         assert_eq!(
             first_frame.rows[8].data[col_idx].red1(),
             Color::BLUE.r() >= first_frame_threshold
@@ -1145,7 +1123,7 @@ mod tests {
         );
 
         // White pixel at (20, 10) - should be white in first frame
-        let col_idx = get_col_index(20);
+        let col_idx = get_mapped_index(20);
         assert_eq!(
             first_frame.rows[10].data[col_idx].red1(),
             Color::WHITE.r() >= first_frame_threshold
@@ -1161,7 +1139,7 @@ mod tests {
 
         // Test lower half pixels (color1)
         // Red pixel at (25, TEST_NROWS + 3) -> row 3, color1
-        let col_idx = get_col_index(25);
+        let col_idx = get_mapped_index(25);
         assert_eq!(
             first_frame.rows[3].data[col_idx].red2(),
             Color::RED.r() >= first_frame_threshold
@@ -1176,7 +1154,7 @@ mod tests {
         );
 
         // Green pixel at (30, TEST_NROWS + 7) -> row 7, color1
-        let col_idx = get_col_index(30);
+        let col_idx = get_mapped_index(30);
         assert_eq!(
             first_frame.rows[7].data[col_idx].red2(),
             Color::GREEN.r() >= first_frame_threshold
@@ -1191,7 +1169,7 @@ mod tests {
         );
 
         // Blue pixel at (35, TEST_NROWS + 12) -> row 12, color1
-        let col_idx = get_col_index(35);
+        let col_idx = get_mapped_index(35);
         assert_eq!(
             first_frame.rows[12].data[col_idx].red2(),
             Color::BLUE.r() >= first_frame_threshold
@@ -1206,13 +1184,13 @@ mod tests {
         );
 
         // Test black pixel - should not be visible in any frame
-        let col_idx = get_col_index(40);
+        let col_idx = get_mapped_index(40);
         assert_eq!(first_frame.rows[1].data[col_idx].red1(), false);
         assert_eq!(first_frame.rows[1].data[col_idx].grn1(), false);
         assert_eq!(first_frame.rows[1].data[col_idx].blu1(), false);
 
         // Test low brightness pixel (16, 16, 16) - should not be visible in first frame (threshold 32)
-        let col_idx = get_col_index(45);
+        let col_idx = get_mapped_index(45);
         assert_eq!(
             first_frame.rows[3].data[col_idx].red1(),
             16 >= first_frame_threshold
