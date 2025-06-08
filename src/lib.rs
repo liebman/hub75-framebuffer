@@ -32,9 +32,11 @@
 //! const FRAME_COUNT: usize = (1 << BITS) - 1;
 //! ```
 #![no_std]
-// #![warn(missing_docs)]
-// #![warn(clippy::all)]
-// #![warn(clippy::pedantic)]
+#![warn(missing_docs)]
+#![warn(clippy::all)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
 
 #[cfg(not(feature = "esp-dma"))]
 use embedded_dma::ReadBuffer;
@@ -58,7 +60,7 @@ pub enum WordSize {
     Sixteen,
 }
 
-/// Computes the NROWS value from ROWS for DmaFrameBuffer
+/// Computes the NROWS value from ROWS for `DmaFrameBuffer`
 ///
 /// # Arguments
 ///
@@ -66,7 +68,8 @@ pub enum WordSize {
 ///
 /// # Returns
 ///
-/// Number of rows needed internally for DmaFrameBuffer
+/// Number of rows needed internally for `DmaFrameBuffer`
+#[must_use]
 pub const fn compute_rows(rows: usize) -> usize {
     rows / 2
 }
@@ -83,6 +86,7 @@ pub const fn compute_rows(rows: usize) -> usize {
 /// # Returns
 ///
 /// Number of frames required for the given bit depth
+#[must_use]
 pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
 }

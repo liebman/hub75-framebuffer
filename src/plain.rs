@@ -198,7 +198,7 @@ impl<const COLS: usize> Row<COLS> {
 
     pub fn format(&mut self, addr: u8, prev_addr: u8) {
         let mut entry = Entry::default();
-        entry.set_addr(prev_addr as u16);
+        entry.set_addr(u16::from(prev_addr));
         entry.set_output_enable(false);
         for i in 0..COLS {
             // if we enable display too soon then we will have ghosting
@@ -211,7 +211,7 @@ impl<const COLS: usize> Row<COLS> {
                 }
                 i if i == COLS - 1 => {
                     entry.set_latch(true);
-                    entry.set_addr(addr as u16);
+                    entry.set_addr(u16::from(addr));
                 }
                 1 => entry.set_output_enable(true),
                 _ => {}
@@ -256,12 +256,12 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
-    pub fn set_pixel(&mut self, y: usize, x: usize, r: bool, g: bool, b: bool) {
+    pub fn set_pixel(&mut self, y: usize, x: usize, red: bool, green: bool, blue: bool) {
         let row = &mut self.rows[if y < NROWS { y } else { y - NROWS }];
         if y < NROWS {
-            row.set_color0(x, r, g, b);
+            row.set_color0(x, red, green, blue);
         } else {
-            row.set_color1(x, r, g, b);
+            row.set_color1(x, red, green, blue);
         }
     }
 }
@@ -279,7 +279,7 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Default
 /// This is a framebuffer implementation that:
 /// - Manages multiple frames for Binary Code Modulation (BCM)
 /// - Provides DMA-compatible memory layout
-/// - Implements the embedded-graphics DrawTarget trait
+/// - Implements the embedded-graphics `DrawTarget` trait
 ///
 /// # Type Parameters
 /// - `ROWS`: Total number of rows in the panel
@@ -345,6 +345,7 @@ impl<
     ///
     /// let framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// ```
+    #[must_use]
     pub const fn new() -> Self {
         assert!(BITS <= 8);
 
@@ -390,7 +391,7 @@ impl<
     /// framebuffer.clear();
     /// ```
     pub fn clear(&mut self) {
-        for frame in self.frames.iter_mut() {
+        for frame in &mut self.frames {
             frame.format();
         }
     }
@@ -426,10 +427,10 @@ impl<
         // set the pixel in all frames
         for frame in 0..FRAME_COUNT {
             let brightness = (frame as u8 + 1).saturating_mul(brightness_step);
-            let r = color.r() >= brightness;
-            let g = color.g() >= brightness;
-            let b = color.b() >= brightness;
-            self.frames[frame].set_pixel(y, x, r, g, b);
+            let red = color.r() >= brightness;
+            let green = color.g() >= brightness;
+            let blue = color.b() >= brightness;
+            self.frames[frame].set_pixel(y, x, red, green, blue);
         }
     }
 }
@@ -512,7 +513,7 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = &self.frames as *const _ as *const u8;
+        let ptr = (&raw const self.frames).cast::<u8>();
         let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
@@ -530,7 +531,7 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = &self.frames as *const _ as *const u8;
+        let ptr = (&raw const self.frames).cast::<u8>();
         let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
@@ -548,7 +549,7 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = &self.frames as *const _ as *const u8;
+        let ptr = (&raw const self.frames).cast::<u8>();
         let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
@@ -569,7 +570,7 @@ impl<
             .field("frame_count", &self.frames.len())
             .field("frame_size", &core::mem::size_of_val(&self.frames[0]))
             .field("brightness_step", &&brightness_step)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

@@ -284,12 +284,12 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
-    pub fn set_pixel(&mut self, y: usize, x: usize, r: bool, g: bool, b: bool) {
+    pub fn set_pixel(&mut self, y: usize, x: usize, red: bool, green: bool, blue: bool) {
         let row = &mut self.rows[if y < NROWS { y } else { y - NROWS }];
         if y < NROWS {
-            row.set_color0(x, r, g, b);
+            row.set_color0(x, red, green, blue);
         } else {
-            row.set_color1(x, r, g, b);
+            row.set_color1(x, red, green, blue);
         }
     }
 }
@@ -310,7 +310,7 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Default
 /// - Uses 8-bit entries instead of 16-bit
 /// - Separates address and data words
 /// - Supports controller board's hardware latch for row selection
-/// - Implements the embedded-graphics DrawTarget trait
+/// - Implements the embedded-graphics `DrawTarget` trait
 ///
 /// # Type Parameters
 /// - `ROWS`: Total number of rows in the panel
@@ -377,6 +377,7 @@ impl<
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// ```
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             frames: [Frame::new(); FRAME_COUNT],
@@ -419,7 +420,7 @@ impl<
     /// framebuffer.clear();
     /// ```
     pub fn clear(&mut self) {
-        for frame in self.frames.iter_mut() {
+        for frame in &mut self.frames {
             frame.format();
         }
     }
@@ -455,10 +456,10 @@ impl<
         for frame in 0..FRAME_COUNT {
             let brightness_step = 1 << (8 - BITS);
             let brightness = (frame as u8 + 1).saturating_mul(brightness_step);
-            let r = color.r() >= brightness;
-            let g = color.g() >= brightness;
-            let b = color.b() >= brightness;
-            self.frames[frame].set_pixel(y, x, r, g, b);
+            let red = color.r() >= brightness;
+            let green = color.g() >= brightness;
+            let blue = color.b() >= brightness;
+            self.frames[frame].set_pixel(y, x, red, green, blue);
         }
     }
 }
@@ -513,8 +514,8 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = &self.frames as *const _ as *const u8;
-        let len = core::mem::size_of_val(&self.frames);
+        let ptr = (&raw const self.frames).cast::<u8>();
+            let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
 }
@@ -531,8 +532,8 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = &self.frames as *const _ as *const u8;
-        let len = core::mem::size_of_val(&self.frames);
+        let ptr = (&raw const self.frames).cast::<u8>();
+            let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
 }
