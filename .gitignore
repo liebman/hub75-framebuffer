@@ -1,0 +1,10 @@
+/target
+/Cargo.lock
+
+# Coverage reports
+/coverage/
+*.profraw
+*.profdata
+lcov.info
+*.code-workspace
+default.profraw

@@ -1,0 +1,36 @@
+[package]
+name = "hub75-framebuffer"
+description = "Framebuffer implementation for HUB75 LED matrix displays"
+repository = "https://github.com/liebman/esp-hub75"
+documentation = "https://docs.rs/hub75-framebuffer"
+keywords = ["esp32", "led-matrix", "hub75", "embedded", "framebuffer"]
+categories = ["embedded", "hardware-support", "no-std"]
+edition = "2021"
+version = "0.1.0"
+authors = ["liebman <liebman@zod.com>"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.86"
+
+[profile.dev]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "s"
+
+[profile.release]
+debug = true    # Symbols are nice and they don't increase the size on Flash
+opt-level = "s"
+
+[dependencies]
+bitfield = { version = "0.19.1" }
+defmt = { version = "1.0.1", optional = true }
+embedded-dma = "0.2.0"
+embedded-graphics = { version = "0.8.1" }
+esp-hal = { version = "=1.0.0-beta.1", features = ["unstable"], optional = true }
+
+[features]
+default = []
+esp-dma = ["dep:esp-hal"]
+esp32 = ["esp-hal/esp32", "esp-dma"]
+esp32s3 = ["esp-hal/esp32s3", "esp-dma"]
+esp32c6 = ["esp-hal/esp32c6", "esp-dma"]
+defmt = ["dep:defmt"]
+
