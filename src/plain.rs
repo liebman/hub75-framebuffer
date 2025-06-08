@@ -456,20 +456,6 @@ impl<
         const BITS: u8,
         const FRAME_COUNT: usize,
     > embedded_graphics::prelude::OriginDimensions
-    for &DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    fn size(&self) -> embedded_graphics::prelude::Size {
-        embedded_graphics::prelude::Size::new(COLS as u32, ROWS as u32)
-    }
-}
-
-impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > embedded_graphics::prelude::OriginDimensions
     for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn size(&self) -> embedded_graphics::prelude::Size {
@@ -508,24 +494,6 @@ unsafe impl<
         const BITS: u8,
         const FRAME_COUNT: usize,
     > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    #[cfg(not(feature = "esp-dma"))]
-    type Word = u8;
-
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
-    }
-}
-
-unsafe impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > ReadBuffer for &DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[cfg(not(feature = "esp-dma"))]
     type Word = u8;
@@ -612,20 +580,6 @@ impl<
         const FRAME_COUNT: usize,
     > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
     for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
-}
-
-impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for &DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> WordSize {
         WordSize::Sixteen
@@ -1270,16 +1224,26 @@ mod tests {
 
     #[test]
     fn test_read_buffer_implementation() {
+        // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
         let fb = TestFrameBuffer::new();
+        let expected_size = core::mem::size_of_val(&fb.frames);
 
-        // Test direct implementation
+        // Test owned ReadBuffer implementation by calling ReadBuffer::read_buffer explicitly
+        unsafe {
+            let (ptr, len) = <TestFrameBuffer as ReadBuffer>::read_buffer(&fb);
+            assert!(!ptr.is_null());
+            assert_eq!(len, expected_size);
+        }
+
+        // Test direct method call on owned value
         unsafe {
             let (ptr, len) = fb.read_buffer();
             assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
+            assert_eq!(len, expected_size);
         }
 
         // Test reference implementation
+        let fb = TestFrameBuffer::new();
         let fb_ref = &fb;
         unsafe {
             let (ptr, len) = fb_ref.read_buffer();
@@ -1295,6 +1259,25 @@ mod tests {
             assert!(!ptr.is_null());
             assert_eq!(len, core::mem::size_of_val(&fb.frames));
         }
+    }
+
+    #[test]
+    fn test_read_buffer_owned_implementation() {
+        // This test specifically ensures the owned ReadBuffer implementation is tested
+        // by consuming the framebuffer and testing the pointer validity
+        fn test_owned_read_buffer(fb: TestFrameBuffer) -> (bool, usize) {
+            unsafe {
+                let (ptr, len) = fb.read_buffer();
+                (!ptr.is_null(), len)
+            }
+        }
+
+        let fb = TestFrameBuffer::new();
+        let expected_len = core::mem::size_of_val(&fb.frames);
+
+        let (ptr_valid, actual_len) = test_owned_read_buffer(fb);
+        assert!(ptr_valid);
+        assert_eq!(actual_len, expected_len);
     }
 
     #[test]
