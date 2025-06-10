@@ -1,10 +1,33 @@
-//! DMA-based framebuffer implementation for HUB75 LED panels with controller
+//! DMA Optimized framebuffer implementation for HUB75 LED panels with controller
 //! board latch support.
 //!
-//! This module provides a memory-efficient framebuffer implementation that uses
-//! DMA (Direct Memory Access) to transfer pixel data to HUB75 LED panels. It
-//! supports RGB color and brightness control through multiple frames using
-//! Binary Code Modulation (BCM) for precise brightness control.
+//! This module provides a framebuffer implementation with memory
+//! layout optimized for efficient transfer to HUB75 LED panels. The data is
+//! structured for direct signal mapping, making it ideal for DMA transfers but
+//! also suitable for programmatic transfer. It supports RGB color and brightness
+//! control through multiple frames using Binary Code Modulation (BCM).
+//!
+//! # Hardware Requirements
+//! This implementation can be used by any microcontroller that has a peripheral
+//! capable of outputting a clock signal and 8 bits in parallel. A latch circuit
+//! similar to the one shown below can be used to hold the row address. The clock
+//! is gated so it does not reach the HUB75 interface when the latch is open.
+//! Since there is typically 4 2 input nand gates on a chip the 4th is used to allow
+//! PWM to gate the output enable providing much finer grained overall brightness control.
+//!
+// Important: note the blank line of documentation on each side of the image lookup table.
+// The "image lookup table" can be placed anywhere, but we place it here together with the
+// warning if the `doc-images` feature is not enabled.
+#![cfg_attr(feature = "doc-images",
+cfg_attr(all(),
+doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png")))]
+#![cfg_attr(
+not(feature = "doc-images"),
+doc = "**Doc images not enabled**. Compile with feature `doc-images` and Rust version >= 1.54 \
+           to enable."
+)]
+//!
+//! ![Latch Circuit][latch-circuit]
 //!
 //! # Key Differences from Plain Implementation
 //! - Uses controller board's hardware latch to hold row address, reducing
@@ -14,7 +37,6 @@
 //! - Only usable for controller boards with hardware latch support
 //!
 //! # Features
-//! - DMA-based data transfer for optimal performance
 //! - Support for RGB color with brightness control
 //! - Multiple frame buffers for Binary Code Modulation (BCM)
 //! - Integration with embedded-graphics for easy drawing
@@ -95,7 +117,6 @@
 //! This implementation uses unsafe code for DMA operations. The framebuffer
 //! must be properly aligned in memory and the DMA configuration must match the
 //! buffer layout.
-
 use core::convert::Infallible;
 
 use super::Color;
@@ -515,7 +536,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-            let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
 }
@@ -533,7 +554,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-            let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames);
         (ptr, len)
     }
 }

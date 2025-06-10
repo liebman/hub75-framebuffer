@@ -1,12 +1,21 @@
-//! DMA-based framebuffer implementation for HUB75 LED panels.
+//! DMA Optimized framebuffer implementation for HUB75 LED panels.
 //!
-//! This module provides a high-performance framebuffer implementation that uses
-//! DMA (Direct Memory Access) to efficiently transfer pixel data to HUB75 LED
-//! panels. It supports RGB color and brightness control through multiple frames
-//! using Binary Code Modulation (BCM).
+//! This module provides a framebuffer implementation with memory
+//! layout optimized for efficient transfer to HUB75 LED panels. The data is
+//! structured for direct signal mapping, making it ideal for DMA transfers but
+//! also suitable for programmatic transfer. It supports RGB color and brightness
+//! control through multiple frames using Binary Code Modulation (BCM).
+//!
+//! # Hardware Requirements
+//! This implementation can be used by any microcontroller that has a peripheral
+//! capable of outputting a clock signal and 16 bits (though only 14 bits are
+//! actually needed) in parallel. The data is structured to directly match the
+//! HUB75 connector signals, making it suitable for various parallel output
+//! peripherals.
 //!
 //! # Features
-//! - DMA-based data transfer for optimal performance
+//! - Memory layout optimized for efficient data transfer
+//! - Direct signal mapping to HUB75 connector signals
 //! - Support for RGB color with brightness control
 //! - Multiple frame buffers for Binary Code Modulation (BCM)
 //! - Integration with embedded-graphics for easy drawing
