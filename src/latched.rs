@@ -22,8 +22,8 @@
 cfg_attr(all(),
 doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png")))]
 #![cfg_attr(
-not(feature = "doc-images"),
-doc = "**Doc images not enabled**. Compile with feature `doc-images` and Rust version >= 1.54 \
+    not(feature = "doc-images"),
+    doc = "**Doc images not enabled**. Compile with feature `doc-images` and Rust version >= 1.54 \
            to enable."
 )]
 //!

@@ -1,5 +1,39 @@
 //! Framebuffer implementation for HUB75 LED matrix displays.
 //!
+//! ## How HUB75 LED Displays Work
+//!
+//! HUB75 RGB LED matrix panels are scanned, time-multiplexed displays that behave like a long
+//! daisy-chained shift register rather than a random-access framebuffer.
+//!
+//! ### Signal names
+//! - **R1 G1 B1 / R2 G2 B2** – Serial colour data for the upper and lower halves of the active scan line
+//! - **CLK** – Shift-register clock; every rising edge pushes the six colour bits one pixel to the right
+//! - **LAT / STB** – Latch; copies the shift-register contents to the LED drivers for the row currently selected by the address lines
+//! - **OE** – Output-Enable (active LOW): LEDs are lit while OE is LOW and blanked when it is HIGH
+//! - **A B C D (E)** – Row-address select lines (choose which pair of rows is lit)
+//! - **VCC & GND** – 5 V power for panel logic and LED drivers
+//!
+//! ### Row-pair scanning workflow (e.g., 1/16-scan panel)
+//! 1. While the panel is still displaying row pair N − 1, the controller shifts the six-bit colour data for row pair N into the chain (OE remains LOW so row N − 1 stays visible).
+//! 2. After the last pixel is clocked in, the controller raises OE HIGH to blank the LEDs.
+//! 3. With the panel blanked, it first changes the address lines to select row pair N, lets them settle for a few nanoseconds, and **then** pulses LAT to latch the freshly shifted data into the output drivers for that newly selected row.
+//! 4. OE is immediately driven LOW again, lighting row pair N.
+//! 5. Steps 1–4 repeat for every row pair fast enough (hundreds of Hz) that the human eye sees a steady image.
+//!    - If the first row pair is being shifted, the panel continues showing the last row pair of the previous frame until the first blank-address-latch sequence occurs.
+//!
+//! ### Brightness and colour depth (Binary Code Modulation)
+//! - Full colour is typically achieved using **Binary Code Modulation (BCM)**, also known as *Bit-Angle Modulation (BAM)*. Each bit-plane is displayed for a period proportional to its binary weight (1, 2, 4, 8 …), yielding 2ⁿ intensity levels per channel. See [Batsocks – LED dimming using Binary Code Modulation](https://www.batsocks.co.uk/readme/art_bcm_1.htm) for a deeper explanation.
+//! - Because each LED is on for only a fraction of the total frame time, the driver can use relatively high peak currents without overheating while average brightness is preserved.
+//!
+//! ### Implications for software / hardware drivers
+//! - You don't simply "write a pixel" once; you must continuously stream the complete refresh data at MHz-range clock rates.
+//! - Precise timing of CLK, OE, address lines, and LAT is critical—especially the order: blank (OE HIGH) → set address → latch → un-blank (OE LOW).
+//! - Microcontrollers typically employ DMA, PIO, or parallel GPIO tricks, and FPGAs use dedicated logic, to sustain the data throughput while leaving processing resources free.
+//!
+//! In short: a HUB75 panel is a high-speed shift-register chain that relies on rapid row-pair scanning and **Binary Code Modulation (BCM)** to create a bright, full-colour image. Keeping OE LOW almost all the time—blanking only long enough to change the address and pulse LAT—maximises brightness without visible artefacts.
+//!
+//! ## Framebuffer Implementations
+//!
 //! This module provides two different framebuffer implementations optimized for
 //! HUB75 LED matrix displays:
 //!
@@ -14,6 +48,7 @@
 //! - Have configurable row and column dimensions
 //! - Support different color depths through Binary Code Modulation (BCM)
 //! - Implement the `ReadBuffer` trait for DMA compatibility
+//!
 //!
 //! # Examples
 //!
