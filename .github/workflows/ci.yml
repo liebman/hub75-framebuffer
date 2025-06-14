@@ -2,84 +2,101 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
-
-# Cancel any currently running workflows from the same PR, branch, or
-# tag when a new workflow is triggered.
-#
-# https://stackoverflow.com/a/66336834
-concurrency:
-  cancel-in-progress: true
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    branches:
+      - main
 
 env:
-  CARGO_TARGET_DIR: ${{ github.workspace }}/target
   CARGO_TERM_COLOR: always
-  DEFMT_LOG: trace
 
 jobs:
-  build:
-    name: Build Examples
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-D warnings -C link-arg=-Tlinkall.x -C link-arg=-Tdefmt.x"
     strategy:
-      fail-fast: false
       matrix:
-        target: [esp32, esp32s3, esp32c6]
-        features: [log, defmt]
-        include:
-          - target: esp32
-            rust_target: xtensa-esp32-none-elf
-            toolchain: esp
-            example: i2s_parallel
-            cargo_unstable: "-Zbuild-std=core,alloc"
-          - target: esp32
-            rust_target: xtensa-esp32-none-elf
-            toolchain: +esp
-            example: i2s_parallel_latch
-            cargo_unstable: "-Zbuild-std=core,alloc"
-          - target: esp32s3
-            rust_target: xtensa-esp32s3-none-elf
-            toolchain: +esp
-            example: lcd_cam
-            cargo_unstable: "-Zbuild-std=core,alloc"
-          - target: esp32s3
-            rust_target: xtensa-esp32s3-none-elf
-            toolchain: +esp
-            example: lcd_cam_latch
-            cargo_unstable: "-Zbuild-std=core,alloc"
-          - target: esp32c6
-            rust_target: riscv32imac-unknown-none-elf
-            toolchain: ""
-            example: parl_io
-            cargo_unstable: ""
+        features:
+          - ""  # No features
+          - "defmt"
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Build
+        run: cargo build --verbose --no-default-features --features "${{ matrix.features }}"
+      
+      - name: Run tests
+        run: cargo test --verbose --no-default-features --features "${{ matrix.features }}"
 
-      # Install the Rust toolchain for Xtensa devices:
-      - name: Install Xtensa toolchain
-        uses: esp-rs/xtensa-toolchain@v1.5
+  # Additional checks
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          ldproxy: false
-          version: 1.86.0.0
+          components: clippy
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Run clippy
+        run: cargo clippy -F defmt -- -D warnings
 
-      # Install the Rust stable toolchain for RISC-V devices:
-      - name: Install RISC-V toolchain
-        uses: dtolnay/rust-toolchain@v1
+  # Formatting check
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          target: riscv32imc-unknown-none-elf,riscv32imac-unknown-none-elf
-          toolchain: stable
-          components: rust-src
+          components: rustfmt
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - uses: Swatinem/rust-cache@v2
+  # Coverage analysis
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          prefix-key: "ci-${{ matrix.target }}"
-          cache-all-crates: true
-  
-      - name: Build examples
-        run: |
-          cargo ${{ matrix.toolchain }} build --target ${{ matrix.rust_target }} --example ${{ matrix.example }} --features "${{ matrix.target }},${{ matrix.features }}" ${{ matrix.cargo_unstable }}
-
+          components: llvm-tools-preview
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      
+      - name: Generate coverage
+        run: cargo llvm-cov --no-report test
+      - name: Generate coverage report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+      
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: lcov.info
+          fail-on-error: true
+    
