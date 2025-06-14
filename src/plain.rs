@@ -1,4 +1,4 @@
-//! DMA Optimized framebuffer implementation for HUB75 LED panels.
+//! DMA-friendly framebuffer implementation for HUB75 LED panels.
 //!
 //! This module provides a framebuffer implementation with memory
 //! layout optimized for efficient transfer to HUB75 LED panels. The data is
