@@ -47,7 +47,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = "*"           # replace * with the latest version
+hub75-framebuffer = "0.1.0"
 embedded-graphics = "0.8"
 ```
 

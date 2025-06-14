@@ -48,24 +48,6 @@
 //! - Have configurable row and column dimensions
 //! - Support different color depths through Binary Code Modulation (BCM)
 //! - Implement the `ReadBuffer` trait for DMA compatibility
-//!
-//!
-//! # Examples
-//!
-//! ```rust
-//! use embedded_graphics::pixelcolor::Rgb888;
-//! use embedded_dma::ReadBuffer;
-//!
-//! use hub75_framebuffer::FrameBuffer;
-//! use hub75_framebuffer::MutableFrameBuffer;
-//!
-//! // Create a framebuffer with specific dimensions
-//! const ROWS: usize = 32;
-//! const COLS: usize = 64;
-//! const NROWS: usize = ROWS / 2;
-//! const BITS: u8 = 8;
-//! const FRAME_COUNT: usize = (1 << BITS) - 1;
-//! ```
 #![no_std]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
