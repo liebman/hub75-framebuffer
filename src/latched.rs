@@ -134,19 +134,16 @@ bitfield! {
     ///
     /// This structure controls the row selection and timing signals:
     /// - Row address (5 bits)
-    /// - PWM enable signal
     /// - Latch signal for row selection
     ///
     /// The bit layout is as follows:
     /// - Bit 6: Latch signal
-    /// - Bit 5: PWM enable
     /// - Bits 4-0: Row address
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
     #[repr(transparent)]
     struct Address(u8);
     impl Debug;
     pub latch, set_latch: 6;
-    pub pwm_enable, set_pwm_enable: 5;
     pub addr, set_addr: 4, 0;
 }
 
@@ -244,11 +241,9 @@ impl<const COLS: usize> Row<COLS> {
 
     pub fn format(&mut self, addr: u8) {
         for i in 0..4 {
-            let pwm_enable = false; // TBD: this does not work
             let latch = !matches!(i, 3);
             #[cfg(feature = "esp32")]
             let i = map_index(i);
-            self.address[i].set_pwm_enable(pwm_enable);
             self.address[i].set_latch(latch);
             self.address[i].set_addr(addr);
         }
@@ -689,7 +684,6 @@ mod tests {
         let addr = Address::new();
         assert_eq!(addr.0, 0);
         assert_eq!(addr.latch(), false);
-        assert_eq!(addr.pwm_enable(), false);
         assert_eq!(addr.addr(), 0);
     }
 
@@ -700,10 +694,6 @@ mod tests {
         addr.set_latch(true);
         assert_eq!(addr.latch(), true);
         assert_eq!(addr.0 & 0b01000000, 0b01000000);
-
-        addr.set_pwm_enable(true);
-        assert_eq!(addr.pwm_enable(), true);
-        assert_eq!(addr.0 & 0b00100000, 0b00100000);
 
         addr.set_addr(0b11111);
         assert_eq!(addr.addr(), 0b11111);
@@ -719,12 +709,6 @@ mod tests {
         addr.set_latch(true);
         assert_eq!(addr.addr(), 0b11111);
         assert_eq!(addr.latch(), true);
-        assert_eq!(addr.pwm_enable(), false);
-
-        addr.set_pwm_enable(true);
-        assert_eq!(addr.addr(), 0b11111);
-        assert_eq!(addr.latch(), true);
-        assert_eq!(addr.pwm_enable(), true);
     }
 
     #[test]
@@ -819,7 +803,6 @@ mod tests {
         // Check address words configuration
         for (i, addr) in row.address.iter().enumerate() {
             assert_eq!(addr.addr(), test_addr);
-            assert_eq!(addr.pwm_enable(), false);
             // With mapping, we need to check the logical latch behavior
             let logical_i = get_mapped_index(i);
             assert_eq!(addr.latch(), !matches!(logical_i, 3));
