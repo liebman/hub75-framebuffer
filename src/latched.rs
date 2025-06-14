@@ -191,7 +191,7 @@ bitfield! {
     /// Relationship to [`Entry`]
     /// -------------------------
     /// The control bits—output-enable (`OE`) and latch (`LAT`)—occupy **exactly**
-    /// the same bit positions as in [`Entry`].  
+    /// the same bit positions as in [`Entry`].
     /// This deliberate overlap allows both structures to be streamed through the
     /// same GPIO/DMA path without any run-time bit remapping.
     ///
@@ -204,9 +204,9 @@ bitfield! {
     /// Bit layout
     /// ----------
     /// - Bit 7 `OE`  : Output enable
-    /// - Bit 6 `LAT` : Row-latch strobe  
-    ///   When asserted:  
-    ///   1. The address bits (`A`–`E`) are latched by the panel driver.  
+    /// - Bit 6 `LAT` : Row-latch strobe
+    ///   When asserted:
+    ///   1. The address bits (`A`–`E`) are latched by the panel driver.
     ///   2. External glue logic gates the pixel clock (`CLK`), preventing any
     ///      new pixel data from being shifted into the display while the latch
     ///      is open.

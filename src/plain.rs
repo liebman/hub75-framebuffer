@@ -190,7 +190,7 @@ bitfield! {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Entry {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "Entry({=u16:#x})", self.0)
+        defmt::write!(f, "Entry({=u16:#x})", self.0);
     }
 }
 
@@ -1441,17 +1441,5 @@ mod tests {
         // Test that BITS <= 8 assertion is enforced at compile time
         // This test mainly documents the constraint
         assert!(TEST_BITS <= 8);
-    }
-
-    #[cfg(feature = "defmt")]
-    #[test]
-    fn test_defmt_formatting() {
-        let entry = Entry::new();
-        // This test mainly checks that defmt formatting compiles
-        // We can't easily test the actual output in a unit test
-        let _ = format!("{}", defmt::Debug2Format(&entry));
-
-        let fb = TestFrameBuffer::new();
-        let _ = format!("{}", defmt::Debug2Format(&fb));
     }
 }

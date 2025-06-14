@@ -17,7 +17,7 @@ cargo llvm-cov --no-report test
 echo "📋 Generating coverage reports..."
 
 # Generate HTML report
-cargo llvm-cov report --html --output-dir coverage/html
+cargo llvm-cov report --html --output-dir coverage
 
 # Generate LCOV report (for CI/external tools)
 cargo llvm-cov report --lcov --output-path coverage/lcov.info
@@ -27,4 +27,4 @@ cargo llvm-cov report
 
 echo "✅ Coverage analysis complete!"
 echo "📁 HTML report: coverage/html/index.html"
-echo "📁 LCOV report: coverage/lcov.info" 
+echo "📁 LCOV report: coverage/lcov.info"
