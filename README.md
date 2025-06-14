@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/hub75-framebuffer.svg)](https://crates.io/crates/hub75-framebuffer)
 [![Documentation](https://docs.rs/hub75-framebuffer/badge.svg)](https://docs.rs/hub75-framebuffer)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](README.md)
-[![Coverage Status](https://coveralls.io/repos/github/liebman/hub75-framebuffer-rs/badge.svg?branch=main)](https://coveralls.io/github/liebman/hub75-framebuffer-rs?branch=main)
+[![Coverage Status](https://coveralls.io/repos/github/liebman/hub75-framebuffer/badge.svg?branch=main)](https://coveralls.io/github/liebman/hub75-framebuffer?branch=main)
 
 DMA-friendly framebuffer implementations for driving HUB75 RGB LED matrix panels with Rust.  The crate focuses on **performance**, **correct timing**, and **ergonomic drawing** by integrating tightly with the `embedded-graphics` ecosystem.
 
