@@ -1,5 +1,5 @@
-//! DMA Optimized framebuffer implementation for HUB75 LED panels with controller
-//! board latch support.
+//! DMA Optimized framebuffer implementation for HUB75 LED panels with external
+//! latch circuit support.
 //!
 //! This module provides a framebuffer implementation with memory
 //! layout optimized for efficient transfer to HUB75 LED panels. The data is
@@ -30,11 +30,11 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 //! ![Latch Circuit][latch-circuit]
 //!
 //! # Key Differences from Plain Implementation
-//! - Uses controller board's hardware latch to hold row address, reducing
-//!   memory usage
+//! - Uses an external latch circuit to hold the row address and gate the pixel
+//!   clock, reducing memory usage
 //! - 8-bit entries instead of 16-bit, halving memory requirements
 //! - Separate address and data words for better control
-//! - Only usable for controller boards with hardware latch support
+//! - Requires an external latch circuit; not compatible with plain HUB75 wiring
 //!
 //! # Features
 //! - Support for RGB color with brightness control
@@ -102,16 +102,71 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 //! - 8-bit entries store RGB data for two sub-pixels
 //! - Separate address words control row selection and timing
 //! - Multiple frames are used to achieve Binary Code Modulation (BCM)
-//! - DMA transfers the data directly to the controller board without
+//! - DMA transfers the data directly to the panel without
 //!   transformation
+//!
+//! # HUB75 Signal Bit Mapping (8-bit words)
+//! Two distinct 8-bit words are streamed to the panel:
+//!
+//! 1. **Address / Timing (`Address`)** – row-select and latch control.
+//! 2. **Pixel Data (`Entry`)**       – RGB bits for two sub-pixels plus OE/LAT shadow bits.
+//!
+//! The bit layouts intentionally overlap so that *the very same GPIO lines*
+//! can transmit either word without any run-time bit twiddling:
+//!
+//! ```text
+//! Address word (row select & timing)
+//! ┌──7─┬──6──┬─5─┬─4─┬─3─┬─2─┬─1─┬─0─┐
+//! │ OE │ LAT │   │ E │ D │ C │ B │ A │
+//! └────┴─────┴───┴───┴───┴───┴───┴───┘
+//!        ^                ^
+//!        |                └── Row-address lines (LSB = A)
+//!        └── Latch pulse – when HIGH the current address is latched and
+//!            external glue logic gates the pixel clock (`CLK`).
+//! ````
+//! ```text
+//! Entry word (pixel data for two sub-pixels)
+//! ┌──7─┬──6──┬─5──┬─4──┬─3──┬─2──┬─1──┬─0──┐
+//! │ OE │ LAT │ B2 │ G2 │ R2 │ B1 │ G1 │ R1 │
+//! └────┴─────┴────┴────┴────┴────┴────┴────┘
+//! ```
+//!
+//! *Bits 7–6* (OE/LAT) mirror those in the `Address` word so the control lines
+//! remain valid throughout the entire DMA stream.
+//!
+//! # External Latch Timing Sequence
+//! 1. Pixel data for row *N* is clocked out while `OE` is LOW.
+//! 2. `OE` is raised **HIGH** – LEDs blank.
+//! 3. An **`Address` word** with the new row index is transmitted while
+//!    `LAT` is HIGH; the CPLD/logic also blocks `CLK` during this period.
+//! 4. `LAT` returns LOW and `OE` is driven LOW again.
+//!
+//! This keeps visual artefacts to a minimum while allowing the framebuffer to
+//! use just 8 data bits.
+//!
+//! # Binary Code Modulation (BCM) Frames
+//! Brightness is realised with Binary-Code-Modulation just like the *plain*
+//! implementation—see <https://www.batsocks.co.uk/readme/art_bcm_1.htm>.
+//! With a colour depth of `BITS` the driver allocates
+//! `FRAME_COUNT = 2^BITS − 1` frames. Frame *n* (0-based) is displayed for a
+//! time slice proportional to `2^n`.
+//!
+//! For each channel the driver compares the 8-bit colour value against a per-frame
+//! threshold:
+//!
+//! ```text
+//! brightness_step = 256 / 2^BITS
+//! threshold_n     = (n + 1) * brightness_step
+//! ```
+//!
+//! The channel bit is set in frame *n* iff `value >= threshold_n`. Streaming the
+//! frames from LSB to MSB therefore reproduces the intended 8-bit intensity
+//! without extra processing.
 //!
 //! # Memory Layout
 //! Each row consists of:
 //! - 4 address words (8 bits each) for row selection and timing
 //! - COLS data words (8 bits each) for pixel data
-//!
-//! The address words are arranged to match the controller board's hardware
-//! latch timing requirements.
 //!
 //! # Safety
 //! This implementation uses unsafe code for DMA operations. The framebuffer
@@ -130,19 +185,45 @@ use embedded_graphics::prelude::Point;
 use esp_hal::dma::ReadBuffer;
 
 bitfield! {
-    /// 8-bit word representing the address and control signals for a row.
+    /// 8-bit word carrying the row-address and timing control signals that are
+    /// driven on a HUB75 connector.
     ///
-    /// This structure controls the row selection and timing signals:
-    /// - Row address (5 bits)
-    /// - Latch signal for row selection
+    /// Relationship to [`Entry`]
+    /// -------------------------
+    /// The control bits—output-enable (`OE`) and latch (`LAT`)—occupy **exactly**
+    /// the same bit positions as in [`Entry`].  
+    /// This deliberate overlap allows both structures to be streamed through the
+    /// same GPIO/DMA path without any run-time bit remapping.
     ///
-    /// The bit layout is as follows:
-    /// - Bit 6: Latch signal
-    /// - Bits 4-0: Row address
+    /// Field summary
+    /// -------------
+    /// - Row-address lines `A`–`E` (5 bits)
+    /// - Latch signal `LAT`        (1 bit)
+    /// - Output-enable `OE`        (1 bit)
+    ///
+    /// Bit layout
+    /// ----------
+    /// - Bit 7 `OE`  : Output enable
+    /// - Bit 6 `LAT` : Row-latch strobe  
+    ///   When asserted:  
+    ///   1. The address bits (`A`–`E`) are latched by the panel driver.  
+    ///   2. External glue logic gates the pixel clock (`CLK`), preventing any
+    ///      new pixel data from being shifted into the display while the latch
+    ///      is open.
+    /// - Bits 4–0 `A`–`E` : Row address (LSB =`A`)
+    ///
+    /// Behaviour notes
+    /// ---------------
+    /// * The address bits take effect only while `LAT` is high; they may be
+    ///   changed safely at any other time.
+    /// * Because `CLK` is inhibited during the latch interval, the pixel data
+    ///   stream produced from [`Entry`] words is paused until the latch is
+    ///   released.
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
     #[repr(transparent)]
     struct Address(u8);
     impl Debug;
+    pub output_enable, set_output_enable: 7;
     pub latch, set_latch: 6;
     pub addr, set_addr: 4, 0;
 }
@@ -202,15 +283,16 @@ impl Entry {
     }
 }
 
-/// Represents a single row of pixels with controller board latch support.
+/// Represents a single row of pixels with external latch circuit support.
 ///
 /// Each row contains both pixel data and address information:
 /// - 4 address words for row selection and timing
 /// - COLS data words for pixel data
 ///
-/// The address words are arranged to match the controller board's hardware
-/// latch timing requirements, with a specific mapping for ESP32 (2, 3, 0, 1) to
-/// optimize DMA transfers.
+/// The address words are arranged to match the external latch circuit's
+/// timing requirements. When the `esp32` feature is enabled, a specific
+/// mapping (2, 3, 0, 1) is applied to correct for the strange byte ordering
+/// required for the ESP32's I2S peripheral.
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
 struct Row<const COLS: usize> {
@@ -318,14 +400,14 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Default
     }
 }
 
-/// DMA-compatible framebuffer for HUB75 LED panels with controller board latch
+/// DMA-compatible framebuffer for HUB75 LED panels with external latch circuit
 /// support.
 ///
-/// This implementation is optimized for memory usage and controller board latch
+/// This implementation is optimized for memory usage and external latch circuit
 /// support:
 /// - Uses 8-bit entries instead of 16-bit
 /// - Separates address and data words
-/// - Supports controller board's hardware latch for row selection
+/// - Supports the external latch circuit for row selection
 /// - Implements the embedded-graphics `DrawTarget` trait
 ///
 /// # Type Parameters
