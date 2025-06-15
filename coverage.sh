@@ -11,7 +11,7 @@ cargo llvm-cov clean
 
 # Run coverage for blocking implementation (default features)
 echo "📊 Testing..."
-cargo llvm-cov --no-report test
+cargo llvm-cov --no-report test --features "skip-black-pixels"
 
 # Generate coverage reports
 echo "📋 Generating coverage reports..."

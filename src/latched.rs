@@ -270,16 +270,18 @@ impl Entry {
         Self(0)
     }
 
-    fn set_color0(&mut self, r: bool, g: bool, b: bool) {
-        self.set_red1(r);
-        self.set_grn1(g);
-        self.set_blu1(b);
+    // Optimized color bit manipulation constants and methods
+    const COLOR0_MASK: u8 = 0b0000_0111; // bits 0-2: R1, G1, B1
+    const COLOR1_MASK: u8 = 0b0011_1000; // bits 3-5: R2, G2, B2
+
+    #[inline]
+    fn set_color0_bits(&mut self, bits: u8) {
+        self.0 = (self.0 & !Self::COLOR0_MASK) | (bits & Self::COLOR0_MASK);
     }
 
-    fn set_color1(&mut self, r: bool, g: bool, b: bool) {
-        self.set_red2(r);
-        self.set_grn2(g);
-        self.set_blu2(b);
+    #[inline]
+    fn set_color1_bits(&mut self, bits: u8) {
+        self.0 = (self.0 & !Self::COLOR1_MASK) | ((bits << 3) & Self::COLOR1_MASK);
     }
 }
 
@@ -342,18 +344,24 @@ impl<const COLS: usize> Row<COLS> {
         }
     }
 
+    #[inline]
     pub fn set_color0(&mut self, col: usize, r: bool, g: bool, b: bool) {
+        let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
         #[cfg(feature = "esp32")]
         let col = map_index(col);
-        let entry = &mut self.data[col];
-        entry.set_color0(r, g, b);
+        debug_assert!(col < COLS);
+        let entry = unsafe { self.data.get_unchecked_mut(col) };
+        entry.set_color0_bits(bits);
     }
 
+    #[inline]
     pub fn set_color1(&mut self, col: usize, r: bool, g: bool, b: bool) {
+        let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
         #[cfg(feature = "esp32")]
         let col = map_index(col);
-        let entry = &mut self.data[col];
-        entry.set_color1(r, g, b);
+        debug_assert!(col < COLS);
+        let entry = unsafe { self.data.get_unchecked_mut(col) };
+        entry.set_color1_bits(bits);
     }
 }
 
@@ -382,6 +390,7 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
+    #[inline]
     pub fn set_pixel(&mut self, y: usize, x: usize, red: bool, green: bool, blue: bool) {
         let row = &mut self.rows[if y < NROWS { y } else { y - NROWS }];
         if y < NROWS {
@@ -546,18 +555,39 @@ impl<
         self.set_pixel_internal(p.x as usize, p.y as usize, color);
     }
 
+    #[inline]
+    fn frames_on(v: u8) -> usize {
+        // v / brightness_step but the compiler resolves the shift at build-time
+        (v as usize) >> (8 - BITS)
+    }
+
+    #[inline]
     fn set_pixel_internal(&mut self, x: usize, y: usize, color: Rgb888) {
         if x >= COLS || y >= ROWS {
             return;
         }
-        // set the pixel in all frames
-        for frame in 0..FRAME_COUNT {
-            let brightness_step = 1 << (8 - BITS);
-            let brightness = (frame as u8 + 1).saturating_mul(brightness_step);
-            let red = color.r() >= brightness;
-            let green = color.g() >= brightness;
-            let blue = color.b() >= brightness;
-            self.frames[frame].set_pixel(y, x, red, green, blue);
+
+        // Early exit for black pixels - common in UI backgrounds
+        // Only enabled when skip-black-pixels feature is active
+        #[cfg(feature = "skip-black-pixels")]
+        if color == Rgb888::BLACK {
+            return;
+        }
+
+        // Pre-compute how many frames each channel should be on
+        let red_frames = Self::frames_on(color.r());
+        let green_frames = Self::frames_on(color.g());
+        let blue_frames = Self::frames_on(color.b());
+
+        // Set the pixel in all frames based on pre-computed frame counts
+        for (frame_idx, frame) in self.frames.iter_mut().enumerate() {
+            frame.set_pixel(
+                y,
+                x,
+                frame_idx < red_frames,
+                frame_idx < green_frames,
+                frame_idx < blue_frames,
+            );
         }
     }
 }
@@ -842,7 +872,8 @@ mod tests {
     fn test_entry_set_color0() {
         let mut entry = Entry::new();
 
-        entry.set_color0(true, false, true);
+        let bits = (u8::from(true) << 2) | (u8::from(false) << 1) | u8::from(true); // b=1, g=0, r=1 = 0b101
+        entry.set_color0_bits(bits);
         assert_eq!(entry.red1(), true);
         assert_eq!(entry.grn1(), false);
         assert_eq!(entry.blu1(), true);
@@ -853,7 +884,8 @@ mod tests {
     fn test_entry_set_color1() {
         let mut entry = Entry::new();
 
-        entry.set_color1(false, true, true);
+        let bits = (u8::from(true) << 2) | (u8::from(true) << 1) | u8::from(false); // b=1, g=1, r=0 = 0b110
+        entry.set_color1_bits(bits);
         assert_eq!(entry.red2(), false);
         assert_eq!(entry.grn2(), true);
         assert_eq!(entry.blu2(), true);
@@ -1400,6 +1432,114 @@ mod tests {
             assert_eq!(color.r(), *r);
             assert_eq!(color.g(), *g);
             assert_eq!(color.b(), *b);
+        }
+    }
+
+    #[test]
+    fn test_bits_assertion() {
+        // Test that BITS <= 8 assertion is enforced at compile time
+        // This test mainly documents the constraint
+        assert!(TEST_BITS <= 8);
+    }
+
+    #[test]
+    #[cfg(feature = "skip-black-pixels")]
+    fn test_skip_black_pixels_enabled() {
+        let mut fb = TestFrameBuffer::new();
+        fb.clear();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first frame
+        let mapped_col_10 = get_mapped_index(10);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+
+        // Now set it to black - with skip-black-pixels enabled, this should be ignored
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should still be red (black write was skipped)
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "skip-black-pixels"))]
+    fn test_skip_black_pixels_disabled() {
+        let mut fb = TestFrameBuffer::new();
+        fb.clear();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first frame
+        let mapped_col_10 = get_mapped_index(10);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+
+        // Now set it to black - with skip-black-pixels disabled, this should overwrite
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should now be black (all bits false)
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+    }
+
+    #[test]
+    fn test_bcm_frame_overwrite() {
+        let mut fb = TestFrameBuffer::new();
+        fb.clear();
+
+        // First write a white pixel (255, 255, 255)
+        fb.set_pixel_internal(10, 5, Color::WHITE);
+
+        let mapped_col_10 = get_mapped_index(10);
+
+        // Verify white pixel is lit in all frames (255 >= all thresholds)
+        for frame in fb.frames.iter() {
+            // White (255) should be active in all frames since it's >= all thresholds
+            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
+            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
+            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+        }
+
+        // Now overwrite with 50% white (128, 128, 128)
+        let half_white = embedded_graphics::pixelcolor::Rgb888::new(128, 128, 128);
+        fb.set_pixel_internal(10, 5, half_white);
+
+        // Verify only the correct frames are lit for 50% white
+        // With 3-bit depth: thresholds are 32, 64, 96, 128, 160, 192, 224
+        // 128 should activate frames 0, 1, 2, 3 (thresholds 32, 64, 96, 128)
+        // but not frames 4, 5, 6 (thresholds 160, 192, 224)
+        let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
+        for (frame_idx, frame) in fb.frames.iter().enumerate() {
+            let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
+            let should_be_active = 128 >= frame_threshold;
+
+            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), should_be_active);
+            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), should_be_active);
+            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), should_be_active);
+        }
+
+        // Specifically verify the expected pattern for 3-bit depth
+        // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
+        for frame_idx in 0..4 {
+            assert_eq!(
+                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                true
+            );
+        }
+        // Frames 4-6 should be inactive (thresholds 160, 192, 224)
+        for frame_idx in 4..TEST_FRAME_COUNT {
+            assert_eq!(
+                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                false
+            );
         }
     }
 }
