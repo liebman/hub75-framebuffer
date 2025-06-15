@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- `skip-black-pixels` feature that gives a performance boot in some cases (#2)
+
+### Changed
+
+- almost double(!) performance of the set_pixel in the plain and latched `DmaFrameBuffers` (#2)
+
 ## [0.1.0] - 2025-06-14
 
 - initial version

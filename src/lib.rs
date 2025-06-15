@@ -48,6 +48,26 @@
 //! - Have configurable row and column dimensions
 //! - Support different color depths through Binary Code Modulation (BCM)
 //! - Implement the `ReadBuffer` trait for DMA compatibility
+//!
+//! ## Performance Features
+//!
+//! ### `skip-black-pixels` Feature (disabled by default)
+//! When enabled, calls to `set_pixel()` with `Color::BLACK` return early without
+//! writing to the framebuffer. This provides a significant performance boost for
+//! UI applications that frequently draw black pixels (backgrounds, clearing, etc.)
+//! by assuming the framebuffer was already cleared.
+//!
+//! **Important**: This optimization assumes that black pixels represent "no change"
+//! rather than "explicitly set to black". By default, black pixels are written
+//! normally to ensure correct overwrite behavior. To enable the optimization:
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.1", features = ["skip-black-pixels"] }
+//! ```
+//!
+//! When disabled (default), black pixels are written normally, ensuring correct
+//! overwrite behavior at a small performance cost.
 #![no_std]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
