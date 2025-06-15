@@ -37,5 +37,16 @@ esp32c6 = ["esp-hal/esp32c6", "esp-dma"]
 defmt = ["dep:defmt"]
 doc-images = ["dep:embed-doc-image"]
 
+[dev-dependencies]
+criterion = "0.6"
+
+[[bench]]
+name = "set_pixel_latched"
+harness = false
+
+[[bench]]
+name = "set_pixel_plain"
+harness = false
+
 [package.metadata.docs.rs]
 features = ["doc-images"]
