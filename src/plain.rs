@@ -275,11 +275,11 @@ struct Row<const COLS: usize> {
 }
 
 const fn map_index(i: usize) -> usize {
-    #[cfg(feature = "esp32")]
+    #[cfg(feature = "esp32-ordering")]
     {
         i ^ 1
     }
-    #[cfg(not(feature = "esp32"))]
+    #[cfg(not(feature = "esp32-ordering"))]
     {
         i
     }
@@ -303,13 +303,13 @@ impl<const COLS: usize> Row<COLS> {
         let template = make_data_template::<COLS>(addr, prev_addr);
 
         // Apply ESP32 mapping if needed
-        #[cfg(feature = "esp32")]
+        #[cfg(feature = "esp32-ordering")]
         {
             for (i, &entry) in template.iter().enumerate() {
                 self.data[map_index(i)] = entry;
             }
         }
-        #[cfg(not(feature = "esp32"))]
+        #[cfg(not(feature = "esp32-ordering"))]
         {
             self.data.copy_from_slice(&template);
         }
@@ -932,6 +932,17 @@ mod tests {
         assert_eq!(entry.blu2(), true);
         // Check that only the expected bits are set
         assert_eq!(entry.0 & 0b0110000000000000, 0b0110000000000000); // Green2 and Blue2 bits
+    }
+
+    #[test]
+    fn test_entry_debug_formatting() {
+        let entry = Entry(0x1234);
+        let debug_str = format!("{:?}", entry);
+        assert_eq!(debug_str, "Entry(0x1234)");
+
+        let entry = Entry(0xabcd);
+        let debug_str = format!("{:?}", entry);
+        assert_eq!(debug_str, "Entry(0xabcd)");
     }
 
     #[test]
@@ -1644,7 +1655,7 @@ mod tests {
     #[test]
     fn test_esp32_mapping() {
         // Test the ESP32-specific index mapping
-        #[cfg(feature = "esp32")]
+        #[cfg(feature = "esp32-ordering")]
         {
             assert_eq!(map_index(0), 1);
             assert_eq!(map_index(1), 0);
@@ -1653,7 +1664,7 @@ mod tests {
             assert_eq!(map_index(4), 5);
             assert_eq!(map_index(5), 4);
         }
-        #[cfg(not(feature = "esp32"))]
+        #[cfg(not(feature = "esp32-ordering"))]
         {
             assert_eq!(map_index(0), 0);
             assert_eq!(map_index(1), 1);
