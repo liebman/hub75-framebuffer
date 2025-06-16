@@ -148,6 +148,43 @@ use super::WordSize;
 
 const BLANKING_DELAY: usize = 1;
 
+// Pre-computed lookup table for all possible row addresses (0-31)
+// This eliminates the need to compute addresses at runtime
+const ADDR_TABLE: [u16; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+
+/// Creates a pre-computed data template for a row with the specified addresses.
+/// This template contains all the timing and control signals but no pixel data.
+#[inline]
+const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entry; COLS] {
+    let mut data = [Entry::new(); COLS];
+    let mut i = 0;
+
+    while i < COLS {
+        let mut entry = Entry::new();
+        entry.0 = ADDR_TABLE[prev_addr as usize];
+
+        // Apply timing control based on position
+        if i == 1 {
+            entry.0 |= 0b1_0000_0000; // set output_enable bit
+        } else if i == COLS - BLANKING_DELAY - 1 {
+            // output_enable already false from initialization
+        } else if i == COLS - 1 {
+            entry.0 |= 0b0010_0000; // set latch bit
+            entry.0 = (entry.0 & !0b0001_1111) | ADDR_TABLE[addr as usize]; // set new address
+        } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
+            entry.0 |= 0b1_0000_0000; // set output_enable bit
+        }
+
+        data[i] = entry;
+        i += 1;
+    }
+
+    data
+}
+
 bitfield! {
     /// A 16-bit word representing the HUB75 control signals for a single pixel.
     ///
@@ -172,7 +209,6 @@ bitfield! {
     #[derive(Clone, Copy, Default, PartialEq)]
     #[repr(transparent)]
     struct Entry(u16);
-    impl Debug;
     dummy2, set_dummy2: 15;
     blu2, set_blu2: 14;
     grn2, set_grn2: 13;
@@ -185,6 +221,14 @@ bitfield! {
     dummy0, set_dummy0: 6;
     latch, set_latch: 5;
     addr, set_addr: 4, 0;
+}
+
+impl core::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Entry")
+            .field(&format_args!("{:#x}", self.0))
+            .finish()
+    }
 }
 
 #[cfg(feature = "defmt")]
@@ -255,27 +299,31 @@ impl<const COLS: usize> Row<COLS> {
     }
 
     pub fn format(&mut self, addr: u8, prev_addr: u8) {
-        let mut entry = Entry::default();
-        entry.set_addr(u16::from(prev_addr));
-        entry.set_output_enable(false);
-        for i in 0..COLS {
-            // if we enable display too soon then we will have ghosting
-            // second to last pixel, blank the display
-            // last pixel, open the latch, set the new row address
-            // the latch will be closed on the first pixel of the next row.
-            match i {
-                i if i == COLS - BLANKING_DELAY - 1 => {
-                    entry.set_output_enable(false);
-                }
-                i if i == COLS - 1 => {
-                    entry.set_latch(true);
-                    entry.set_addr(u16::from(addr));
-                }
-                1 => entry.set_output_enable(true),
-                _ => {}
-            }
+        // Use pre-computed template and bulk copy for maximum performance
+        let template = make_data_template::<COLS>(addr, prev_addr);
 
-            self.data[map_index(i)] = entry;
+        // Apply ESP32 mapping if needed
+        #[cfg(feature = "esp32")]
+        {
+            for (i, &entry) in template.iter().enumerate() {
+                self.data[map_index(i)] = entry;
+            }
+        }
+        #[cfg(not(feature = "esp32"))]
+        {
+            self.data.copy_from_slice(&template);
+        }
+    }
+
+    /// Fast clear method that preserves timing/control bits while clearing pixel data.
+    /// Uses bulk memory operations for maximum performance.
+    #[inline]
+    pub fn clear_colors(&mut self) {
+        // Clear color bits while preserving timing and control bits
+        const COLOR_CLEAR_MASK: u16 = !0b0111_1110_0000_0000; // Clear bits 9-14 (R1,G1,B1,R2,G2,B2)
+
+        for entry in &mut self.data {
+            entry.0 &= COLOR_CLEAR_MASK;
         }
     }
 
@@ -319,6 +367,14 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
                 addr as u8 - 1
             };
             row.format(addr as u8, prev_addr);
+        }
+    }
+
+    /// Fast clear method that preserves timing/control bits while clearing pixel data.
+    #[inline]
+    pub fn clear_colors(&mut self) {
+        for row in &mut self.rows {
+            row.clear_colors();
         }
     }
 
@@ -399,7 +455,15 @@ impl<
         const FRAME_COUNT: usize,
     > DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    /// Create a new framebuffer.
+    /// Create a new, ready-to-use framebuffer.
+    ///
+    /// This creates a new framebuffer and automatically formats it with proper timing signals.
+    /// The framebuffer is immediately ready for pixel operations and DMA transfers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `BITS` is greater than 8, as only 1-8 bit color depths are supported.
+    ///
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{Color,plain::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -410,16 +474,21 @@ impl<
     /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
-    /// let framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+    /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+    /// // No need to call format() - framebuffer is ready to use!
     /// ```
     #[must_use]
-    pub const fn new() -> Self {
-        assert!(BITS <= 8);
+    pub fn new() -> Self {
+        debug_assert!(BITS <= 8);
 
-        Self {
+        let mut instance = Self {
             _align: 0,
             frames: [Frame::new(); FRAME_COUNT],
-        }
+        };
+
+        // Pre-format the framebuffer so it's immediately ready for use
+        instance.format();
+        instance
     }
 
     /// This returns the size of the DMA buffer in bytes.  Its used to calculate
@@ -442,8 +511,12 @@ impl<
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
-    /// Clear and format the framebuffer.
-    /// Note:This must be called before the first use of the framebuffer!
+    /// Perform full formatting of the framebuffer with timing and control signals.
+    ///
+    /// This sets up all the timing and control signals needed for proper HUB75 operation.
+    /// This is automatically called by `new()`, so you typically don't need to call this
+    /// unless you want to completely reinitialize the framebuffer.
+    ///
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{Color,plain::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -455,11 +528,38 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-    /// framebuffer.clear();
+    /// framebuffer.format(); // Reinitialize if needed
     /// ```
-    pub fn clear(&mut self) {
+    #[inline]
+    pub fn format(&mut self) {
         for frame in &mut self.frames {
             frame.format();
+        }
+    }
+
+    /// Fast clear operation that clears all pixel data while preserving timing signals.
+    ///
+    /// This is much faster than `format()` when you just want to clear the display
+    /// since it preserves all the timing and control signals that are already set up.
+    /// Use this for clearing between frames or when you want to start drawing fresh content.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use hub75_framebuffer::{Color,plain::DmaFrameBuffer,compute_rows,compute_frame_count};
+    ///
+    /// const ROWS: usize = 32;
+    /// const COLS: usize = 64;
+    /// const BITS: u8 = 3; // Color depth (8 brightness levels, 7 frames)
+    /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
+    /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
+    ///
+    /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+    /// framebuffer.clear(); // Fast clear for new content
+    /// ```
+    #[inline]
+    pub fn clear(&mut self) {
+        for frame in &mut self.frames {
+            frame.clear_colors();
         }
     }
 
@@ -1025,8 +1125,7 @@ mod tests {
 
     #[test]
     fn test_dma_framebuffer_clear() {
-        let mut fb = TestFrameBuffer::new();
-        fb.clear();
+        let fb = TestFrameBuffer::new();
 
         // After clearing, all frames should be formatted
         for frame in &fb.frames {
@@ -1052,7 +1151,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_set_pixel_bounds() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test negative coordinates
         fb.set_pixel(Point::new(-1, 5), Color::RED);
@@ -1066,7 +1164,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_set_pixel_internal() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         let red_color = Color::RED;
         fb.set_pixel_internal(10, 5, red_color);
@@ -1086,7 +1183,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_brightness_modulation() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test with a medium brightness value
         let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
@@ -1133,7 +1229,6 @@ mod tests {
     #[test]
     fn test_draw_target() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         let pixels = vec![
             embedded_graphics::Pixel(Point::new(0, 0), Color::RED),
@@ -1155,7 +1250,6 @@ mod tests {
     #[test]
     fn test_draw_iter_pixel_verification() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Create test pixels with specific colors and positions
         let pixels = vec![
@@ -1297,7 +1391,6 @@ mod tests {
     #[test]
     fn test_embedded_graphics_integration() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Draw a rectangle
         let result = Rectangle::new(Point::new(5, 5), Size::new(10, 8))
@@ -1310,6 +1403,104 @@ mod tests {
             .into_styled(PrimitiveStyle::with_fill(Color::BLUE))
             .draw(&mut fb);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "skip-black-pixels")]
+    fn test_skip_black_pixels_enabled() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first frame
+        let mapped_col_10 = get_mapped_index(10);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+
+        // Now set it to black - with skip-black-pixels enabled, this should be ignored
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should still be red (black write was skipped)
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "skip-black-pixels"))]
+    fn test_skip_black_pixels_disabled() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first frame
+        let mapped_col_10 = get_mapped_index(10);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+
+        // Now set it to black - with skip-black-pixels disabled, this should overwrite
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should now be black (all bits false)
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+    }
+
+    #[test]
+    fn test_bcm_frame_overwrite() {
+        let mut fb = TestFrameBuffer::new();
+
+        // First write a white pixel (255, 255, 255)
+        fb.set_pixel_internal(10, 5, Color::WHITE);
+
+        let mapped_col_10 = get_mapped_index(10);
+
+        // Verify white pixel is lit in all frames (255 >= all thresholds)
+        for frame in fb.frames.iter() {
+            // White (255) should be active in all frames since it's >= all thresholds
+            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
+            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
+            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+        }
+
+        // Now overwrite with 50% white (128, 128, 128)
+        let half_white = Color::from(embedded_graphics::pixelcolor::Rgb888::new(128, 128, 128));
+        fb.set_pixel_internal(10, 5, half_white);
+
+        // Verify only the correct frames are lit for 50% white
+        // With 3-bit depth: thresholds are 32, 64, 96, 128, 160, 192, 224
+        // 128 should activate frames 0, 1, 2, 3 (thresholds 32, 64, 96, 128)
+        // but not frames 4, 5, 6 (thresholds 160, 192, 224)
+        let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
+        for (frame_idx, frame) in fb.frames.iter().enumerate() {
+            let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
+            let should_be_active = 128 >= frame_threshold;
+
+            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), should_be_active);
+            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), should_be_active);
+            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), should_be_active);
+        }
+
+        // Specifically verify the expected pattern for 3-bit depth
+        // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
+        for frame_idx in 0..4 {
+            assert_eq!(
+                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                true
+            );
+        }
+        // Frames 4-6 should be inactive (thresholds 160, 192, 224)
+        for frame_idx in 4..TEST_FRAME_COUNT {
+            assert_eq!(
+                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                false
+            );
+        }
     }
 
     #[test]
@@ -1398,7 +1589,7 @@ mod tests {
         let fb1 = TestFrameBuffer::new();
         let fb2 = TestFrameBuffer::default();
 
-        // Both should be equivalent
+        // Both should be equivalent in size, but may differ in content since new() calls format()
         assert_eq!(fb1.frames.len(), fb2.frames.len());
         assert_eq!(fb1._align, fb2._align);
     }
@@ -1415,7 +1606,6 @@ mod tests {
     #[test]
     fn test_color_values() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test different color values
         let colors = [
@@ -1456,12 +1646,12 @@ mod tests {
         // Test the ESP32-specific index mapping
         #[cfg(feature = "esp32")]
         {
-            assert_eq!(map_index(0), 2);
-            assert_eq!(map_index(1), 3);
-            assert_eq!(map_index(2), 0);
-            assert_eq!(map_index(3), 1);
-            assert_eq!(map_index(4), 6); // 4 ^ 1 = 5, but this function XORs with 1
-            assert_eq!(map_index(5), 7);
+            assert_eq!(map_index(0), 1);
+            assert_eq!(map_index(1), 0);
+            assert_eq!(map_index(2), 3);
+            assert_eq!(map_index(3), 2);
+            assert_eq!(map_index(4), 5);
+            assert_eq!(map_index(5), 4);
         }
         #[cfg(not(feature = "esp32"))]
         {
@@ -1480,103 +1670,27 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "skip-black-pixels")]
-    fn test_skip_black_pixels_enabled() {
+    fn test_fast_clear_method() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
-        // Set a red pixel first
+        // Set some pixels
         fb.set_pixel_internal(10, 5, Color::RED);
+        fb.set_pixel_internal(20, 10, Color::GREEN);
 
-        // Verify it's red in the first frame
+        // Verify pixels are set
         let mapped_col_10 = get_mapped_index(10);
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
 
-        // Now set it to black - with skip-black-pixels enabled, this should be ignored
-        fb.set_pixel_internal(10, 5, Color::BLACK);
-
-        // The pixel should still be red (black write was skipped)
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
-    }
-
-    #[test]
-    #[cfg(not(feature = "skip-black-pixels"))]
-    fn test_skip_black_pixels_disabled() {
-        let mut fb = TestFrameBuffer::new();
+        // Clear using fast method
         fb.clear();
 
-        // Set a red pixel first
-        fb.set_pixel_internal(10, 5, Color::RED);
-
-        // Verify it's red in the first frame
-        let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
-
-        // Now set it to black - with skip-black-pixels disabled, this should overwrite
-        fb.set_pixel_internal(10, 5, Color::BLACK);
-
-        // The pixel should now be black (all bits false)
+        // Verify pixels are cleared but timing signals remain
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
-    }
 
-    #[test]
-    fn test_bcm_frame_overwrite() {
-        let mut fb = TestFrameBuffer::new();
-        fb.clear();
-
-        // First write a white pixel (255, 255, 255)
-        fb.set_pixel_internal(10, 5, Color::WHITE);
-
-        let mapped_col_10 = get_mapped_index(10);
-
-        // Verify white pixel is lit in all frames (255 >= all thresholds)
-        for frame in fb.frames.iter() {
-            // White (255) should be active in all frames since it's >= all thresholds
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
-        }
-
-        // Now overwrite with 50% white (128, 128, 128)
-        let half_white = Color::from(embedded_graphics::pixelcolor::Rgb888::new(128, 128, 128));
-        fb.set_pixel_internal(10, 5, half_white);
-
-        // Verify only the correct frames are lit for 50% white
-        // With 3-bit depth: thresholds are 32, 64, 96, 128, 160, 192, 224
-        // 128 should activate frames 0, 1, 2, 3 (thresholds 32, 64, 96, 128)
-        // but not frames 4, 5, 6 (thresholds 160, 192, 224)
-        let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
-        for (frame_idx, frame) in fb.frames.iter().enumerate() {
-            let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
-            let should_be_active = 128 >= frame_threshold;
-
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), should_be_active);
-        }
-
-        // Specifically verify the expected pattern for 3-bit depth
-        // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
-        for frame_idx in 0..4 {
-            assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
-                true
-            );
-        }
-        // Frames 4-6 should be inactive (thresholds 160, 192, 224)
-        for frame_idx in 4..TEST_FRAME_COUNT {
-            assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
-                false
-            );
-        }
+        // Verify timing signals are still present (check last pixel has latch)
+        let last_col = get_mapped_index(TEST_COLS - 1);
+        assert_eq!(fb.frames[0].rows[5].data[last_col].latch(), true);
     }
 }

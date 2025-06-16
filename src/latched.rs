@@ -304,6 +304,7 @@ struct Row<const COLS: usize> {
 
 // bytes are output in the order 2, 3, 0, 1
 #[cfg(feature = "esp32")]
+#[inline]
 fn map_index(index: usize) -> usize {
     let bits = match index & 0b11 {
         0 => 2,
@@ -315,6 +316,61 @@ fn map_index(index: usize) -> usize {
     (index & !0b11) | bits
 }
 
+/// Pre-computed address table for all possible row addresses (0-31).
+/// Each entry contains the 4 address words needed for that row.
+const fn make_addr_table() -> [[Address; 4]; 32] {
+    let mut tbl = [[Address::new(); 4]; 32];
+    let mut addr = 0;
+    while addr < 32 {
+        let mut i = 0;
+        while i < 4 {
+            let latch = i != 3;
+            let mapped_i = if cfg!(feature = "esp32") {
+                match i & 0b11 {
+                    0 => 2,
+                    1 => 3,
+                    2 => 0,
+                    3 => 1,
+                    _ => unreachable!(),
+                }
+            } else {
+                i
+            };
+            let latch_bit = if latch { 1u8 << 6 } else { 0u8 };
+            tbl[addr][mapped_i].0 = latch_bit | addr as u8;
+            i += 1;
+        }
+        addr += 1;
+    }
+    tbl
+}
+
+static ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
+
+/// Pre-computed data template for a row with the given number of columns.
+/// This template has the correct OE/LAT bits set for each column position.
+const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
+    let mut data = [Entry::new(); COLS];
+    let mut i = 0;
+    while i < COLS {
+        let mapped_i = if cfg!(feature = "esp32") {
+            match i & 0b11 {
+                0 => 2,
+                1 => 3,
+                2 => 0,
+                3 => 1,
+                _ => unreachable!(),
+            }
+        } else {
+            i
+        };
+        // Set latch to false and output_enable to true for all except last column
+        data[mapped_i].0 = if mapped_i == COLS - 1 { 0 } else { 0b1000_0000 }; // OE bit
+        i += 1;
+    }
+    data
+}
+
 impl<const COLS: usize> Row<COLS> {
     pub const fn new() -> Self {
         Self {
@@ -323,24 +379,24 @@ impl<const COLS: usize> Row<COLS> {
         }
     }
 
+    #[inline]
     pub fn format(&mut self, addr: u8) {
-        for i in 0..4 {
-            let latch = !matches!(i, 3);
-            #[cfg(feature = "esp32")]
-            let i = map_index(i);
-            self.address[i].set_latch(latch);
-            self.address[i].set_addr(addr);
-        }
-        let mut entry = Entry::default();
-        entry.set_latch(false);
-        entry.set_output_enable(true);
-        for i in 0..COLS {
-            #[cfg(feature = "esp32")]
-            let i = map_index(i);
-            if i == COLS - 1 {
-                entry.set_output_enable(false);
-            }
-            self.data[i] = entry;
+        // Use pre-computed address table
+        self.address.copy_from_slice(&ADDR_TABLE[addr as usize]);
+
+        // Use pre-computed data template - create it each time since we can't use generics in static
+        let data_template = make_data_template::<COLS>();
+        self.data.copy_from_slice(&data_template);
+    }
+
+    /// Fast clear that only zeros the color bits, preserving OE/LAT control bits
+    #[inline]
+    pub fn clear_colors(&mut self) {
+        // Clear color bits while preserving timing and control bits
+        const COLOR_CLEAR_MASK: u8 = !0b0011_1111; // Clear bits 0-5 (R1,G1,B1,R2,G2,B2)
+
+        for entry in &mut self.data {
+            entry.0 &= COLOR_CLEAR_MASK;
         }
     }
 
@@ -384,9 +440,18 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
+    #[inline]
     pub fn format(&mut self) {
         for (addr, row) in self.rows.iter_mut().enumerate() {
             row.format(addr as u8);
+        }
+    }
+
+    /// Fast clear that only zeros the color bits, preserving control bits
+    #[inline]
+    pub fn clear_colors(&mut self) {
+        for row in &mut self.rows {
+            row.clear_colors();
         }
     }
 
@@ -472,6 +537,7 @@ impl<
     > DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     /// Create a new framebuffer with the given number of frames.
+    /// The framebuffer is automatically formatted and ready to use.
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{latched::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -483,12 +549,15 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+    /// // Ready to use immediately
     /// ```
     #[must_use]
-    pub const fn new() -> Self {
-        Self {
+    pub fn new() -> Self {
+        let mut fb = Self {
             frames: [Frame::new(); FRAME_COUNT],
-        }
+        };
+        fb.format();
+        fb
     }
 
     /// This returns the size of the DMA buffer in bytes.  Its used to calculate
@@ -511,8 +580,9 @@ impl<
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
-    /// Clear and format the framebuffer.
-    /// Note:This must be called before the first use of the framebuffer!
+    /// Format the framebuffer, setting up all control bits and clearing pixel data.
+    /// This method does a full format of all control bits and clears all pixel data.
+    /// Normally you don't need to call this as `new()` automatically formats the framebuffer.
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{Color,latched::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -524,11 +594,34 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-    /// framebuffer.clear();
+    /// // framebuffer.format(); // Not needed - new() already calls this
     /// ```
-    pub fn clear(&mut self) {
+    pub fn format(&mut self) {
         for frame in &mut self.frames {
             frame.format();
+        }
+    }
+
+    /// Clear pixel colors while preserving control bits.
+    /// This is much faster than `format()` and is the typical way to clear the display.
+    /// # Example
+    /// ```rust,no_run
+    /// use hub75_framebuffer::{Color,latched::DmaFrameBuffer,compute_rows,compute_frame_count};
+    ///
+    /// const ROWS: usize = 32;
+    /// const COLS: usize = 64;
+    /// const BITS: u8 = 3; // Color depth (8 brightness levels, 7 frames)
+    /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
+    /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
+    ///
+    /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+    /// // ... draw some pixels ...
+    /// framebuffer.clear(); // Fast clear of pixel data
+    /// ```
+    #[inline]
+    pub fn clear(&mut self) {
+        for frame in &mut self.frames {
+            frame.clear_colors();
         }
     }
 
@@ -1064,11 +1157,13 @@ mod tests {
     }
 
     #[test]
-    fn test_dma_framebuffer_clear() {
-        let mut fb = TestFrameBuffer::new();
-        fb.clear();
+    fn test_dma_framebuffer_format() {
+        let mut fb = TestFrameBuffer {
+            frames: [Frame::new(); TEST_FRAME_COUNT],
+        };
+        fb.format();
 
-        // After clearing, all frames should be formatted
+        // After formatting, all frames should be formatted
         for frame in &fb.frames {
             for (addr, row) in frame.rows.iter().enumerate() {
                 for address in &row.address {
@@ -1081,7 +1176,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_set_pixel_bounds() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test negative coordinates
         fb.set_pixel(Point::new(-1, 5), Color::RED);
@@ -1095,7 +1189,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_set_pixel_internal() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         let red_color = Rgb888::new(255, 0, 0);
         fb.set_pixel_internal(10, 5, red_color);
@@ -1115,7 +1208,6 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_brightness_modulation() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test with a medium brightness value
         let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
@@ -1153,7 +1245,6 @@ mod tests {
     #[test]
     fn test_draw_target() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         let pixels = vec![
             embedded_graphics::Pixel(Point::new(0, 0), Color::RED),
@@ -1168,7 +1259,6 @@ mod tests {
     #[test]
     fn test_draw_iter_pixel_verification() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Create test pixels with specific colors and positions
         let pixels = vec![
@@ -1327,7 +1417,6 @@ mod tests {
     #[test]
     fn test_embedded_graphics_integration() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Draw a rectangle
         let result = Rectangle::new(Point::new(5, 5), Size::new(10, 8))
@@ -1446,7 +1535,6 @@ mod tests {
     #[cfg(feature = "skip-black-pixels")]
     fn test_skip_black_pixels_enabled() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Set a red pixel first
         fb.set_pixel_internal(10, 5, Color::RED);
@@ -1470,7 +1558,6 @@ mod tests {
     #[cfg(not(feature = "skip-black-pixels"))]
     fn test_skip_black_pixels_disabled() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Set a red pixel first
         fb.set_pixel_internal(10, 5, Color::RED);
@@ -1493,7 +1580,6 @@ mod tests {
     #[test]
     fn test_bcm_frame_overwrite() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // First write a white pixel (255, 255, 255)
         fb.set_pixel_internal(10, 5, Color::WHITE);
@@ -1540,6 +1626,133 @@ mod tests {
                 fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
                 false
             );
+        }
+    }
+
+    #[test]
+    fn test_new_auto_formats() {
+        let fb = TestFrameBuffer::new();
+
+        // After new(), all frames should be formatted
+        for frame in &fb.frames {
+            for (addr, row) in frame.rows.iter().enumerate() {
+                for address in &row.address {
+                    assert_eq!(address.addr() as usize, addr);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Set some pixels
+        fb.set_pixel_internal(10, 5, Color::RED);
+        fb.set_pixel_internal(20, 10, Color::GREEN);
+
+        let mapped_col_10 = get_mapped_index(10);
+        let mapped_col_20 = get_mapped_index(20);
+
+        // Verify pixels are set
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].grn1(), true);
+
+        // Clear
+        fb.clear();
+
+        // Verify pixels are cleared but control bits are preserved
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].red1(), false);
+        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].grn1(), false);
+        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].blu1(), false);
+
+        // Verify control bits are still correct
+        for frame in &fb.frames {
+            for (addr, row) in frame.rows.iter().enumerate() {
+                // Check address words
+                for address in &row.address {
+                    assert_eq!(address.addr() as usize, addr);
+                }
+                // Check OE bits in data
+                for (i, entry) in row.data.iter().enumerate() {
+                    let logical_i = get_mapped_index(i);
+                    assert_eq!(entry.output_enable(), logical_i != TEST_COLS - 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_row_clear_colors() {
+        let mut row: Row<TEST_COLS> = Row::new();
+        row.format(5);
+
+        // Set some colors
+        row.set_color0(0, true, false, true);
+        row.set_color1(1, false, true, false);
+
+        let mapped_col_0 = get_mapped_index(0);
+        let mapped_col_1 = get_mapped_index(1);
+
+        // Verify colors are set
+        assert_eq!(row.data[mapped_col_0].red1(), true);
+        assert_eq!(row.data[mapped_col_0].blu1(), true);
+        assert_eq!(row.data[mapped_col_1].grn2(), true);
+
+        // Store original control bits
+        let original_oe_0 = row.data[mapped_col_0].output_enable();
+        let original_latch_0 = row.data[mapped_col_0].latch();
+        let original_oe_1 = row.data[mapped_col_1].output_enable();
+        let original_latch_1 = row.data[mapped_col_1].latch();
+
+        // Clear colors
+        row.clear_colors();
+
+        // Verify colors are cleared
+        assert_eq!(row.data[mapped_col_0].red1(), false);
+        assert_eq!(row.data[mapped_col_0].grn1(), false);
+        assert_eq!(row.data[mapped_col_0].blu1(), false);
+        assert_eq!(row.data[mapped_col_1].red2(), false);
+        assert_eq!(row.data[mapped_col_1].grn2(), false);
+        assert_eq!(row.data[mapped_col_1].blu2(), false);
+
+        // Verify control bits are preserved
+        assert_eq!(row.data[mapped_col_0].output_enable(), original_oe_0);
+        assert_eq!(row.data[mapped_col_0].latch(), original_latch_0);
+        assert_eq!(row.data[mapped_col_1].output_enable(), original_oe_1);
+        assert_eq!(row.data[mapped_col_1].latch(), original_latch_1);
+    }
+
+    #[test]
+    fn test_addr_table_correctness() {
+        // Test that the pre-computed address table matches the original logic
+        for addr in 0..32 {
+            let mut expected_addresses = [Address::new(); 4];
+
+            // Original logic
+            for i in 0..4 {
+                let latch = !matches!(i, 3);
+                #[cfg(feature = "esp32")]
+                let mapped_i = map_index(i);
+                #[cfg(not(feature = "esp32"))]
+                let mapped_i = i;
+
+                expected_addresses[mapped_i].set_latch(latch);
+                expected_addresses[mapped_i].set_addr(addr);
+            }
+
+            // Compare with table
+            let table_addresses = &ADDR_TABLE[addr as usize];
+            for i in 0..4 {
+                assert_eq!(
+                    table_addresses[i].0, expected_addresses[i].0,
+                    "Address table mismatch for addr={}, index={}",
+                    addr, i
+                );
+            }
         }
     }
 }

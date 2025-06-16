@@ -49,5 +49,13 @@ harness = false
 name = "set_pixel_plain"
 harness = false
 
+[[bench]]
+name = "clear_plain"
+harness = false
+
+[[bench]]
+name = "clear_latched"
+harness = false
+
 [package.metadata.docs.rs]
 features = ["doc-images"]
