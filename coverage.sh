@@ -12,6 +12,7 @@ cargo llvm-cov clean
 # Run coverage for blocking implementation (default features)
 echo "📊 Testing..."
 cargo llvm-cov --no-report test --features "skip-black-pixels"
+cargo llvm-cov --no-report test --features "esp32-ordering"
 
 # Generate coverage reports
 echo "📋 Generating coverage reports..."
