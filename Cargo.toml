@@ -66,5 +66,13 @@ harness = false
 name = "fill_rect_latched"
 harness = false
 
+[[bench]]
+name = "render_text_plain"
+harness = false
+
+[[bench]]
+name = "render_text_latched"
+harness = false
+
 [package.metadata.docs.rs]
 features = ["doc-images"]

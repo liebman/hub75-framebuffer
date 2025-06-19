@@ -1804,4 +1804,82 @@ mod tests {
             }
         }
     }
+
+    // Helper constants for the glyph dimensions used by FONT_6X10
+    const CHAR_W: i32 = 6;
+    const CHAR_H: i32 = 10;
+
+    /// Draws the glyph 'A' at `origin` and verifies every pixel against a software reference.  
+    /// Re-usable for different panel locations.
+    fn verify_glyph_at(fb: &mut TestFrameBuffer, origin: Point) {
+        use embedded_graphics::mock_display::MockDisplay;
+        use embedded_graphics::mono_font::ascii::FONT_6X10;
+        use embedded_graphics::mono_font::MonoTextStyle;
+        use embedded_graphics::text::{Baseline, Text};
+
+        // Draw the character on the framebuffer.
+        let style = MonoTextStyle::new(&FONT_6X10, Color::WHITE);
+        Text::with_baseline("A", origin, style, Baseline::Top)
+            .draw(fb)
+            .unwrap();
+
+        // Reference bitmap for the glyph at (0,0)
+        let mut reference: MockDisplay<Color> = MockDisplay::new();
+        Text::with_baseline("A", Point::zero(), style, Baseline::Top)
+            .draw(&mut reference)
+            .unwrap();
+
+        // Iterate over the glyph's bounding box and compare pixel states.
+        for dy in 0..CHAR_H {
+            for dx in 0..CHAR_W {
+                let expected_on = reference
+                    .get_pixel(Point::new(dx, dy))
+                    .unwrap_or(Color::BLACK)
+                    != Color::BLACK;
+
+                let gx = (origin.x + dx) as usize;
+                let gy = (origin.y + dy) as usize;
+
+                // we have computed the origin to be within the panel, so we don't need to check for bounds
+                // if gx >= TEST_COLS || gy >= TEST_ROWS {
+                //     continue;
+                // }
+
+                // Fetch the entry from frame 0 directly.
+                let frame0 = &fb.frames[0];
+                let e = if gy < TEST_NROWS {
+                    &frame0.rows[gy].data[map_index(gx)]
+                } else {
+                    &frame0.rows[gy - TEST_NROWS].data[map_index(gx)]
+                };
+
+                let (r, g, b) = if gy >= TEST_NROWS {
+                    (e.red2(), e.grn2(), e.blu2())
+                } else {
+                    (e.red1(), e.grn1(), e.blu1())
+                };
+
+                if expected_on {
+                    assert!(r && g && b);
+                } else {
+                    assert!(!r && !g && !b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_draw_char_corners() {
+        // Upper-left and lower-right character placement.
+        let upper_left = Point::new(0, 0);
+        let lower_right = Point::new(TEST_COLS as i32 - CHAR_W, TEST_ROWS as i32 - CHAR_H);
+
+        let mut fb = TestFrameBuffer::new();
+        fb.clear();
+
+        // Verify glyph in the upper-left corner.
+        verify_glyph_at(&mut fb, upper_left);
+        // Verify glyph in the lower-right corner.
+        verify_glyph_at(&mut fb, lower_right);
+    }
 }
