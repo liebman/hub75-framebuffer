@@ -330,19 +330,15 @@ impl<const COLS: usize> Row<COLS> {
     #[inline]
     pub fn set_color0(&mut self, col: usize, r: bool, g: bool, b: bool) {
         let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
-        let mapped_col = map_index(col);
-        debug_assert!(mapped_col < COLS);
-        let entry = unsafe { self.data.get_unchecked_mut(mapped_col) };
-        entry.set_color0_bits(bits);
+        let col = map_index(col);
+        self.data[col].set_color0_bits(bits);
     }
 
     #[inline]
     pub fn set_color1(&mut self, col: usize, r: bool, g: bool, b: bool) {
         let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
-        let mapped_col = map_index(col);
-        debug_assert!(mapped_col < COLS);
-        let entry = unsafe { self.data.get_unchecked_mut(mapped_col) };
-        entry.set_color1_bits(bits);
+        let col = map_index(col);
+        self.data[col].set_color1_bits(bits);
     }
 }
 
@@ -1703,5 +1699,80 @@ mod tests {
         // Verify timing signals are still present (check last pixel has latch)
         let last_col = get_mapped_index(TEST_COLS - 1);
         assert_eq!(fb.frames[0].rows[5].data[last_col].latch(), true);
+    }
+
+    // Remove the old `test_draw_char_bottom_right` and replace with a helper + combined test.
+
+    // Constants for FONT_6X10 glyph size
+    const CHAR_W: i32 = 6;
+    const CHAR_H: i32 = 10;
+
+    /// Draws glyph 'A' at `origin` and validates framebuffer pixels against a reference.
+    fn verify_glyph_at(fb: &mut TestFrameBuffer, origin: Point) {
+        use embedded_graphics::mock_display::MockDisplay;
+        use embedded_graphics::mono_font::ascii::FONT_6X10;
+        use embedded_graphics::mono_font::MonoTextStyle;
+        use embedded_graphics::text::{Baseline, Text};
+
+        // Draw the glyph
+        let style = MonoTextStyle::new(&FONT_6X10, Color::WHITE);
+        Text::with_baseline("A", origin, style, Baseline::Top)
+            .draw(fb)
+            .unwrap();
+
+        // Reference glyph at (0,0)
+        let mut reference: MockDisplay<Color> = MockDisplay::new();
+        Text::with_baseline("A", Point::zero(), style, Baseline::Top)
+            .draw(&mut reference)
+            .unwrap();
+
+        for dy in 0..CHAR_H {
+            for dx in 0..CHAR_W {
+                let expected_on = reference
+                    .get_pixel(Point::new(dx, dy))
+                    .unwrap_or(Color::BLACK)
+                    != Color::BLACK;
+
+                let gx = (origin.x + dx) as usize;
+                let gy = (origin.y + dy) as usize;
+
+                // we have computed the origin to be within the panel, so we don't need to check for bounds
+                // if gx >= TEST_COLS || gy >= TEST_ROWS {
+                //     continue;
+                // }
+
+                // Fetch Entry from frame 0
+                let frame0 = &fb.frames[0];
+                let e = if gy < TEST_NROWS {
+                    &frame0.rows[gy].data[get_mapped_index(gx)]
+                } else {
+                    &frame0.rows[gy - TEST_NROWS].data[get_mapped_index(gx)]
+                };
+
+                let (r, g, b) = if gy >= TEST_NROWS {
+                    (e.red2(), e.grn2(), e.blu2())
+                } else {
+                    (e.red1(), e.grn1(), e.blu1())
+                };
+
+                if expected_on {
+                    assert!(r && g && b,);
+                } else {
+                    assert!(!r && !g && !b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_draw_char_corners() {
+        let upper_left = Point::new(0, 0);
+        let lower_right = Point::new(TEST_COLS as i32 - CHAR_W, TEST_ROWS as i32 - CHAR_H);
+
+        let mut fb = TestFrameBuffer::new();
+        fb.clear();
+
+        verify_glyph_at(&mut fb, upper_left);
+        verify_glyph_at(&mut fb, lower_right);
     }
 }

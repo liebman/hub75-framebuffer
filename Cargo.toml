@@ -42,6 +42,9 @@ doc-images = ["dep:embed-doc-image"]
 [dev-dependencies]
 criterion = "0.6"
 
+[lib]
+bench = false
+
 [[bench]]
 name = "set_pixel_latched"
 harness = false
@@ -56,6 +59,22 @@ harness = false
 
 [[bench]]
 name = "clear_latched"
+harness = false
+
+[[bench]]
+name = "fill_rect_plain"
+harness = false
+
+[[bench]]
+name = "fill_rect_latched"
+harness = false
+
+[[bench]]
+name = "render_text_plain"
+harness = false
+
+[[bench]]
+name = "render_text_latched"
 harness = false
 
 [package.metadata.docs.rs]
