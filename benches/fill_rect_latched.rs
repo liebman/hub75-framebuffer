@@ -1,6 +1,6 @@
 // Run with: cargo bench --bench fill_rect_latched
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use embedded_graphics::{
     prelude::*,
     primitives::{PrimitiveStyle, Rectangle},
@@ -18,21 +18,14 @@ const FRAME_COUNT: usize = compute_frame_count(BITS);
 
 type TestFrameBuffer = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
 
-// Configure Criterion for better statistical rigor and consistency
 fn configure_criterion() -> Criterion {
     Criterion::default()
-        .sample_size(200) // More samples for better accuracy
+        .sample_size(100)
         .measurement_time(Duration::from_secs(10)) // Longer measurement time
-        .warm_up_time(Duration::from_secs(3)) // Adequate warm-up
-        .confidence_level(0.95) // Higher confidence level
-        .significance_level(0.02) // More sensitive to changes
+        .warm_up_time(Duration::from_secs(3))
+        .confidence_level(0.95)
+        .significance_level(0.05)
 }
-
-// Test colors: focused set without black pixel complexity
-const TEST_COLORS: &[(&str, Color)] = &[
-    ("red", Color::RED),                 // High intensity (255, 0, 0)
-    ("gray", Color::new(128, 128, 128)), // Medium intensity, typical UI color
-];
 
 // Comprehensive rectangle test cases covering different sizes, positions, and aspect ratios
 fn get_test_rectangles() -> Vec<(&'static str, Rectangle)> {
@@ -109,6 +102,18 @@ fn draw_rect_optimized(fb: &mut TestFrameBuffer, rect: &Rectangle, color: Color)
         .unwrap();
 }
 
+// Calculate appropriate iteration count to target ~1-5ms per measurement
+fn get_iteration_count(rect: &Rectangle) -> usize {
+    let pixel_count = rect.size.width * rect.size.height;
+    // Scale iterations inversely with rectangle size to maintain consistent timing
+    match pixel_count {
+        0..=50 => 1000,      // Small rectangles: more iterations
+        51..=500 => 500,     // Medium rectangles: moderate iterations  
+        501..=1000 => 200,   // Large rectangles: fewer iterations
+        _ => 100,            // Very large rectangles: minimal iterations
+    }
+}
+
 fn fill_rect_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("fill_rect_latched");
 
@@ -117,45 +122,48 @@ fn fill_rect_benchmark(c: &mut Criterion) {
     for (rect_name, rect) in rectangles.iter() {
         let pixel_count = (rect.size.width * rect.size.height) as u64;
         let memory_bytes = pixel_count * FRAME_COUNT as u64; // Approximate memory access
+        let iterations = get_iteration_count(rect);
 
-        group.throughput(Throughput::Elements(pixel_count));
-        group.throughput(Throughput::Bytes(memory_bytes));
+        group.throughput(Throughput::Elements(pixel_count * iterations as u64));
+        group.throughput(Throughput::Bytes(memory_bytes * iterations as u64));
 
-        for (color_name, color) in TEST_COLORS.iter() {
-            // Baseline benchmark
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}_baseline", rect_name), color_name),
-                &(rect, *color),
-                |b, (rect, color)| {
-                    let mut fb = TestFrameBuffer::new();
-                    b.iter(|| {
+        // Baseline benchmark
+        group.bench_with_input(
+            format!("{}_baseline", rect_name),
+            &(rect, Color::RED, iterations),
+            |b, (rect, color, iterations)| {
+                let mut fb = TestFrameBuffer::new();
+                b.iter(|| {
+                    for _ in 0..*iterations {
                         fb.clear();
                         black_box(draw_rect_baseline(
                             black_box(&mut fb),
                             black_box(rect),
                             black_box(*color),
                         ));
-                    });
-                },
-            );
+                    }
+                });
+            },
+        );
 
-            // Optimized benchmark
-            group.bench_with_input(
-                BenchmarkId::new(format!("{}_optimized", rect_name), color_name),
-                &(rect, *color),
-                |b, (rect, color)| {
-                    let mut fb = TestFrameBuffer::new();
-                    b.iter(|| {
+        // Optimized benchmark
+        group.bench_with_input(
+            format!("{}_optimized", rect_name),
+            &(rect, Color::RED, iterations),
+            |b, (rect, color, iterations)| {
+                let mut fb = TestFrameBuffer::new();
+                b.iter(|| {
+                    for _ in 0..*iterations {
                         fb.clear();
                         black_box(draw_rect_optimized(
                             black_box(&mut fb),
                             black_box(rect),
                             black_box(*color),
                         ));
-                    });
-                },
-            );
-        }
+                    }
+                });
+            },
+        );
     }
 
     group.finish();

@@ -42,6 +42,9 @@ doc-images = ["dep:embed-doc-image"]
 [dev-dependencies]
 criterion = "0.6"
 
+[lib]
+bench = false
+
 [[bench]]
 name = "set_pixel_latched"
 harness = false
