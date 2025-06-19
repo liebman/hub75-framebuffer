@@ -107,10 +107,10 @@ fn get_iteration_count(rect: &Rectangle) -> usize {
     let pixel_count = rect.size.width * rect.size.height;
     // Scale iterations inversely with rectangle size to maintain consistent timing
     match pixel_count {
-        0..=50 => 1000,      // Small rectangles: more iterations
-        51..=500 => 500,     // Medium rectangles: moderate iterations  
-        501..=1000 => 200,   // Large rectangles: fewer iterations
-        _ => 100,            // Very large rectangles: minimal iterations
+        0..=50 => 1000,    // Small rectangles: more iterations
+        51..=500 => 500,   // Medium rectangles: moderate iterations
+        501..=1000 => 200, // Large rectangles: fewer iterations
+        _ => 100,          // Very large rectangles: minimal iterations
     }
 }
 

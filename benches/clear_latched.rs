@@ -25,7 +25,9 @@ fn configure_criterion() -> Criterion {
 
 fn clear_latched(c: &mut Criterion) {
     let mut group = c.benchmark_group("clear_latched");
-    group.throughput(Throughput::Elements((ROWS * COLS * FRAME_COUNT * ITERATIONS) as u64));
+    group.throughput(Throughput::Elements(
+        (ROWS * COLS * FRAME_COUNT * ITERATIONS) as u64,
+    ));
 
     group.bench_function("latched_dma_framebuffer_clear", |b| {
         // Create a formatted framebuffer once

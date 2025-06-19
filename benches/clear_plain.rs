@@ -25,7 +25,9 @@ fn configure_criterion() -> Criterion {
 
 fn clear_plain(c: &mut Criterion) {
     let mut group = c.benchmark_group("clear_plain");
-    group.throughput(Throughput::Elements((ROWS * COLS * FRAME_COUNT * ITERATIONS) as u64));
+    group.throughput(Throughput::Elements(
+        (ROWS * COLS * FRAME_COUNT * ITERATIONS) as u64,
+    ));
 
     group.bench_function("plain_dma_framebuffer_clear", |b| {
         // Create a formatted framebuffer once

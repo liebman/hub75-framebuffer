@@ -384,18 +384,14 @@ impl<const COLS: usize> Row<COLS> {
     pub fn set_color0(&mut self, col: usize, r: bool, g: bool, b: bool) {
         let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
         let col = map_index(col);
-        debug_assert!(col < COLS);
-        let entry = unsafe { self.data.get_unchecked_mut(col) };
-        entry.set_color0_bits(bits);
+        self.data[col].set_color0_bits(bits);
     }
 
     #[inline]
     pub fn set_color1(&mut self, col: usize, r: bool, g: bool, b: bool) {
         let bits = (u8::from(b) << 2) | (u8::from(g) << 1) | u8::from(r);
         let col = map_index(col);
-        debug_assert!(col < COLS);
-        let entry = unsafe { self.data.get_unchecked_mut(col) };
-        entry.set_color1_bits(bits);
+        self.data[col].set_color1_bits(bits);
     }
 }
 

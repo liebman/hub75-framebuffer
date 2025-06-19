@@ -28,9 +28,9 @@ const TEST_STRINGS: &[(&str, &str)] = &[
 // Calculate appropriate iteration count based on text length to target ~1-5ms per measurement
 fn get_iteration_count(text: &str) -> usize {
     match text.len() {
-        0..=10 => 1000,      // Short text: more iterations
-        11..=25 => 500,      // Medium text: moderate iterations
-        _ => 200,            // Long text: fewer iterations
+        0..=10 => 1000, // Short text: more iterations
+        11..=25 => 500, // Medium text: moderate iterations
+        _ => 200,       // Long text: fewer iterations
     }
 }
 
@@ -82,42 +82,50 @@ fn render_text_benchmark(c: &mut Criterion) {
             * FONT_6X10.character_size.width
             * FONT_6X10.character_size.height) as u64;
         let iterations = get_iteration_count(text);
-        
+
         group.throughput(Throughput::Elements(pixel_count * iterations as u64));
 
         // Baseline
-        group.bench_with_input(BenchmarkId::new("baseline", case), &(text, iterations), |b, &(text, iterations)| {
-            let origin = Point::new(0, 0);
-            b.iter(|| {
-                let mut fb = TestFrameBuffer::new();
-                for _ in 0..iterations {
-                    fb.clear();
-                    black_box(draw_text_baseline(
-                        black_box(&mut fb),
-                        black_box(origin),
-                        black_box(text),
-                        black_box(style),
-                    ));
-                }
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("baseline", case),
+            &(text, iterations),
+            |b, &(text, iterations)| {
+                let origin = Point::new(0, 0);
+                b.iter(|| {
+                    let mut fb = TestFrameBuffer::new();
+                    for _ in 0..iterations {
+                        fb.clear();
+                        black_box(draw_text_baseline(
+                            black_box(&mut fb),
+                            black_box(origin),
+                            black_box(text),
+                            black_box(style),
+                        ));
+                    }
+                });
+            },
+        );
 
         // Optimised
-        group.bench_with_input(BenchmarkId::new("optimised", case), &(text, iterations), |b, &(text, iterations)| {
-            let origin = Point::new(0, 0);
-            b.iter(|| {
-                let mut fb = TestFrameBuffer::new();
-                for _ in 0..iterations {
-                    fb.clear();
-                    black_box(draw_text_optimised(
-                        black_box(&mut fb),
-                        black_box(origin),
-                        black_box(text),
-                        black_box(style),
-                    ));
-                }
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("optimised", case),
+            &(text, iterations),
+            |b, &(text, iterations)| {
+                let origin = Point::new(0, 0);
+                b.iter(|| {
+                    let mut fb = TestFrameBuffer::new();
+                    for _ in 0..iterations {
+                        fb.clear();
+                        black_box(draw_text_optimised(
+                            black_box(&mut fb),
+                            black_box(origin),
+                            black_box(text),
+                            black_box(style),
+                        ));
+                    }
+                });
+            },
+        );
     }
 
     group.finish();
