@@ -178,7 +178,7 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
             entry.0 |= 0b1_0000_0000; // set output_enable bit
         }
 
-        data[i] = entry;
+        data[map_index(i)] = entry;
         i += 1;
     }
 
@@ -301,18 +301,7 @@ impl<const COLS: usize> Row<COLS> {
     pub fn format(&mut self, addr: u8, prev_addr: u8) {
         // Use pre-computed template and bulk copy for maximum performance
         let template = make_data_template::<COLS>(addr, prev_addr);
-
-        // Apply ESP32 mapping if needed
-        #[cfg(feature = "esp32-ordering")]
-        {
-            for (i, &entry) in template.iter().enumerate() {
-                self.data[map_index(i)] = entry;
-            }
-        }
-        #[cfg(not(feature = "esp32-ordering"))]
-        {
-            self.data.copy_from_slice(&template);
-        }
+        self.data.copy_from_slice(&template);
     }
 
     /// Fast clear method that preserves timing/control bits while clearing pixel data.
@@ -961,8 +950,8 @@ mod tests {
         row.format(test_addr, prev_addr);
 
         // Check data entries configuration
-        for (i, entry) in row.data.iter().enumerate() {
-            let logical_i = get_mapped_index(i);
+        for (physical_i, entry) in row.data.iter().enumerate() {
+            let logical_i = get_mapped_index(physical_i);
 
             match logical_i {
                 i if i == TEST_COLS - BLANKING_DELAY - 1 => {
