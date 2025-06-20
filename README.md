@@ -91,13 +91,38 @@ Finally hand the raw DMA buffer off to your MCU's parallel peripheral.
 
 ## Crate features
 
-* `doc-images` – embed documentation images when building docs.
-* `esp-hal-dma` – enable DMA integration when using `esp-hal`.
-* `esp32-ordering` – adjust byte ordering required by the ESP32 quirky I²S peripheral.
-* `skip-black-pixels` – skip drawing black pixels for performance boost in UI applications.
-* `defmt` – implement the `defmt::Format` trait so framebuffer types can be logged with the [`defmt`](https://github.com/knurling-rs/defmt) ecosystem.
+### `esp-hal-dma` (required when using `esp-hal`)
+**Required** when using the `esp-hal` crate for ESP32 development. This feature switches the `ReadBuffer` trait implementation from `embedded-dma` to `esp-hal::dma`. If you're targeting ESP32 devices with `esp-hal`, you **must** enable this feature for DMA compatibility.
 
-Enable them in your `Cargo.toml` or with `--features`.
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.1.0", features = ["esp-hal-dma"] }
+esp-hal = "0.20"
+```
+
+### `esp32-ordering` (required for original ESP32 only)
+**Required** when targeting the original ESP32 chip (not ESP32-S3 or other variants). This feature adjusts byte ordering to accommodate the quirky requirements of the ESP32's I²S peripheral in 8-bit and 16-bit modes. Other ESP32 variants (S2, S3, C3, etc.) do **not** need this feature.
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.1.0", features = ["esp32-ordering"] }
+```
+
+### `skip-black-pixels`
+Skip drawing black pixels for performance boost in UI applications. When enabled, calls to `set_pixel()` with `Color::BLACK` return early without writing to the framebuffer, assuming the framebuffer was already cleared.
+
+### `defmt`
+Implement the `defmt::Format` trait so framebuffer types can be logged with the [`defmt`](https://github.com/knurling-rs/defmt) ecosystem.
+
+### `doc-images`
+Embed documentation images when building docs on docs.rs. Not needed for normal usage.
+
+Enable features in your `Cargo.toml`:
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.1.0", features = ["esp-hal-dma", "esp32-ordering"] }
+```
 
 ---
 
