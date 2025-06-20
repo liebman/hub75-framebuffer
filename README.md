@@ -47,7 +47,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = "0.1.0"
+hub75-framebuffer = "0.2.0"
 embedded-graphics = "0.8"
 ```
 
@@ -96,7 +96,7 @@ Finally hand the raw DMA buffer off to your MCU's parallel peripheral.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.1.0", features = ["esp-hal-dma"] }
+hub75-framebuffer = { version = "0.2.0", features = ["esp-hal-dma"] }
 esp-hal = "0.20"
 ```
 
@@ -105,7 +105,7 @@ esp-hal = "0.20"
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.1.0", features = ["esp32-ordering"] }
+hub75-framebuffer = { version = "0.2.0", features = ["esp32-ordering"] }
 ```
 
 ### `skip-black-pixels`
@@ -121,7 +121,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.1.0", features = ["esp-hal-dma", "esp32-ordering"] }
+hub75-framebuffer = { version = "0.2.0", features = ["esp-hal-dma", "esp32-ordering"] }
 ```
 
 ---

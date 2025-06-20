@@ -63,7 +63,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.1", features = ["skip-black-pixels"] }
+//! hub75-framebuffer = { version = "0.2.0", features = ["skip-black-pixels"] }
 //! ```
 //!
 //! ### `esp-hal-dma` Feature (required when using `esp-hal`)
@@ -74,7 +74,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.1", features = ["esp-hal-dma"] }
+//! hub75-framebuffer = { version = "0.2.0", features = ["esp-hal-dma"] }
 //! esp-hal = "0.20"
 //! ```
 //!
@@ -87,7 +87,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.1", features = ["esp32-ordering"] }
+//! hub75-framebuffer = { version = "0.2.0", features = ["esp32-ordering"] }
 //! ```
 //!
 //! ### `defmt` Feature
