@@ -31,11 +31,8 @@ esp-hal = { version = "=1.0.0-beta.1", features = ["unstable"], optional = true 
 [features]
 default = []
 skip-black-pixels = []
-esp-dma = ["dep:esp-hal"]
+esp-hal-dma = ["dep:esp-hal"]
 esp32-ordering = []
-esp32 = ["esp-hal/esp32", "esp-dma", "esp32-ordering"]
-esp32s3 = ["esp-hal/esp32s3", "esp-dma"]
-esp32c6 = ["esp-hal/esp32c6", "esp-dma"]
 defmt = ["dep:defmt"]
 doc-images = ["dep:embed-doc-image"]
 

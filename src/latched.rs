@@ -173,12 +173,12 @@ use core::convert::Infallible;
 
 use super::Color;
 use bitfield::bitfield;
-#[cfg(not(feature = "esp-dma"))]
+#[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
-#[cfg(feature = "esp-dma")]
+#[cfg(feature = "esp-hal-dma")]
 use esp_hal::dma::ReadBuffer;
 
 bitfield! {
@@ -546,7 +546,7 @@ impl<
     /// type FBType = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
     /// let (_, tx_descriptors) = esp_hal::dma_descriptors!(0, FBType::dma_buffer_size_bytes());
     /// ```
-    #[cfg(feature = "esp-dma")]
+    #[cfg(feature = "esp-hal-dma")]
     pub const fn dma_buffer_size_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
@@ -701,7 +701,7 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-dma"))]
+    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -719,7 +719,7 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-dma"))]
+    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "esp-dma")]
+    #[cfg(feature = "esp-hal-dma")]
     fn test_dma_framebuffer_dma_buffer_size() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();

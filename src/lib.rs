@@ -49,7 +49,7 @@
 //! - Support different color depths through Binary Code Modulation (BCM)
 //! - Implement the `ReadBuffer` trait for DMA compatibility
 //!
-//! ## Performance Features
+//! ## Available Feature Flags
 //!
 //! ### `skip-black-pixels` Feature (disabled by default)
 //! When enabled, calls to `set_pixel()` with `Color::BLACK` return early without
@@ -66,8 +66,22 @@
 //! hub75-framebuffer = { version = "0.1", features = ["skip-black-pixels"] }
 //! ```
 //!
-//! When disabled (default), black pixels are written normally, ensuring correct
-//! overwrite behavior at a small performance cost.
+//! ### `esp-hal-dma` Feature
+//! Enables DMA integration when using the `esp-hal` crate for ESP32 development.
+//! This feature switches the `ReadBuffer` trait implementation from `embedded-dma`
+//! to `esp-hal::dma`.
+//!
+//! ### `esp32-ordering` Feature  
+//! Adjusts pixel bit ordering to work around quirks in the ESP32's I²S peripheral.
+//! Enable this when targeting the original ESP32 chip specifically.
+//!
+//! ### `defmt` Feature
+//! Implements `defmt::Format` for framebuffer types so they can be emitted with
+//! the `defmt` logging framework. No functional changes; purely adds a trait impl.
+//!
+//! ### `doc-images` Feature
+//! Embeds documentation images when building docs on docs.rs. Not needed for
+//! normal usage.
 #![no_std]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -75,11 +89,11 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-#[cfg(not(feature = "esp-dma"))]
+#[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
-#[cfg(feature = "esp-dma")]
+#[cfg(feature = "esp-hal-dma")]
 use esp_hal::dma::ReadBuffer;
 
 pub mod latched;

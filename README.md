@@ -27,7 +27,7 @@ If you want a deeper explanation, have a look inside `src/lib.rs` — the crate 
 
 | Module              | Extra hardware | Word size | Memory use | Pros / Cons |
 |---------------------|----------------|-----------|------------|-------------|
-| `plain`             | none           | 16 bit    | high       | Simplest, wires exactly like a standard HUB75 matrix. |
+| `plain`             | none           | 16 bit (14 used) | high       | Simplest, wires exactly like a standard HUB75 matrix. |
 | `latched`           | **external latch gate** (see below) | 8 bit | ×½ of `plain` | Lower memory footprint, but needs a tiny glue-logic board. |
 
 ### The latch circuit
@@ -65,12 +65,6 @@ const FRAME_COUNT:usize = compute_frame_count(BITS);   // (1<<BITS)-1 = 7
 
 // Create a framebuffer (already initialized/cleared)
 let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-
-// Draw a red rectangle
-Rectangle::new(Point::new(10, 10), Size::new(20, 20))
-    .into_styled(PrimitiveStyle::with_fill(Color::RED))
-    .draw(&mut framebuffer)
-    .unwrap();
 ```
 
 You can now draw using any `embedded-graphics` primitive:
@@ -98,8 +92,10 @@ Finally hand the raw DMA buffer off to your MCU's parallel peripheral.
 ## Crate features
 
 * `doc-images` – embed documentation images when building docs.
-* `esp-dma`    – enable if your using `esp-hal`.
-* `esp32`      – adjust byte ordering required by the ESP32 quirky I²S peripheral.
+* `esp-hal-dma` – enable DMA integration when using `esp-hal`.
+* `esp32-ordering` – adjust byte ordering required by the ESP32 quirky I²S peripheral.
+* `skip-black-pixels` – skip drawing black pixels for performance boost in UI applications.
+* `defmt` – implement the `defmt::Format` trait so framebuffer types can be logged with the [`defmt`](https://github.com/knurling-rs/defmt) ecosystem.
 
 Enable them in your `Cargo.toml` or with `--features`.
 
