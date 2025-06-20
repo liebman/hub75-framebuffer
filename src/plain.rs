@@ -57,9 +57,6 @@
 //!
 //! let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
 //!
-//! // Clear the framebuffer
-//! framebuffer.clear();
-//!
 //! // Draw a red rectangle
 //! Rectangle::new(Point::new(10, 10), Size::new(20, 20))
 //!     .into_styled(PrimitiveStyle::with_fill(Color::RED))
@@ -522,7 +519,7 @@ impl<
         }
     }
 
-    /// Fast clear operation that clears all pixel data while preserving timing signals.
+    /// Fast erase operation that clears all pixel data while preserving timing signals.
     ///
     /// This is much faster than `format()` when you just want to clear the display
     /// since it preserves all the timing and control signals that are already set up.
@@ -539,10 +536,10 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-    /// framebuffer.clear(); // Fast clear for new content
+    /// framebuffer.erase();
     /// ```
     #[inline]
-    pub fn clear(&mut self) {
+    pub fn erase(&mut self) {
         for frame in &mut self.frames {
             frame.clear_colors();
         }
@@ -561,7 +558,6 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-    /// framebuffer.clear();
     /// framebuffer.set_pixel(Point::new(10, 10), Color::RED);
     /// ```
     pub fn set_pixel(&mut self, p: Point, color: Color) {
@@ -1120,10 +1116,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dma_framebuffer_clear() {
+    fn test_dma_framebuffer_erase() {
         let fb = TestFrameBuffer::new();
 
-        // After clearing, all frames should be formatted
+        // After erasing, all frames should be formatted
         for frame in &fb.frames {
             for addr in 0..TEST_NROWS {
                 let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
@@ -1678,7 +1674,7 @@ mod tests {
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
 
         // Clear using fast method
-        fb.clear();
+        fb.erase();
 
         // Verify pixels are cleared but timing signals remain
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
@@ -1759,7 +1755,6 @@ mod tests {
         let lower_right = Point::new(TEST_COLS as i32 - CHAR_W, TEST_ROWS as i32 - CHAR_H);
 
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         verify_glyph_at(&mut fb, upper_left);
         verify_glyph_at(&mut fb, lower_right);

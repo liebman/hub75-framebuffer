@@ -9,14 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### ⚠️ Breaking
+
+* Renamed `DmaFrameBuffer::clear()` to `erase()`.  
+  The new name avoids shadowing `embedded_graphics::DrawTarget::clear(Color)`.  
+  Update your code: `fb.clear()` ➜ `fb.erase()`.  
+  If you actually wanted the trait method, call `fb.clear(Color::BLACK)` instead.
+
 ### Added
 
 - `skip-black-pixels` feature that gives a performance boot in some cases (#2)
 
 ### Changed
-
 - almost double(!) performance of the set_pixel in the plain and latched `DmaFrameBuffers` (#2)
-- small performance gain in clear() in the plain and latched `DmaFrameBuffers` (#3)
 
 ## [0.1.0] - 2025-06-14
 

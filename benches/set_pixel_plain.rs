@@ -31,7 +31,6 @@ fn set_pixel_plain(c: &mut Criterion) {
 
     group.bench_function("plain_dma_framebuffer", |b| {
         let mut fb = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-        fb.clear();
 
         b.iter(|| {
             for _ in 0..ITERATIONS {

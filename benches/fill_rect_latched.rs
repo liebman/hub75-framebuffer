@@ -135,7 +135,7 @@ fn fill_rect_benchmark(c: &mut Criterion) {
                 let mut fb = TestFrameBuffer::new();
                 b.iter(|| {
                     for _ in 0..*iterations {
-                        fb.clear();
+                        fb.erase();
                         black_box(draw_rect_baseline(
                             black_box(&mut fb),
                             black_box(rect),
@@ -154,7 +154,7 @@ fn fill_rect_benchmark(c: &mut Criterion) {
                 let mut fb = TestFrameBuffer::new();
                 b.iter(|| {
                     for _ in 0..*iterations {
-                        fb.clear();
+                        fb.erase();
                         black_box(draw_rect_optimized(
                             black_box(&mut fb),
                             black_box(rect),

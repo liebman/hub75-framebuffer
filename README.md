@@ -63,9 +63,14 @@ const BITS:       u8    = 3;               // colour depth ⇒ 7 BCM frames
 const NROWS:      usize = compute_rows(ROWS);          // 16
 const FRAME_COUNT:usize = compute_frame_count(BITS);   // (1<<BITS)-1 = 7
 
-// Create & clear a framebuffer
-let mut fb = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-fb.clear();
+// Create a framebuffer (already initialized/cleared)
+let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
+
+// Draw a red rectangle
+Rectangle::new(Point::new(10, 10), Size::new(20, 20))
+    .into_styled(PrimitiveStyle::with_fill(Color::RED))
+    .draw(&mut framebuffer)
+    .unwrap();
 ```
 
 You can now draw using any `embedded-graphics` primitive:
@@ -77,11 +82,13 @@ use hub75_framebuffer::Color;
 
 Rectangle::new(Point::new(0, 0), Size::new(COLS as u32, ROWS as u32))
     .into_styled(PrimitiveStyle::with_fill(Color::BLACK))
-    .draw(&mut fb)?;
+    .draw(&mut framebuffer)
+    .unwrap();
 
 Circle::new(Point::new(20, 10), 8)
     .into_styled(PrimitiveStyle::with_fill(Color::GREEN))
-    .draw(&mut fb)?;
+    .draw(&mut framebuffer)
+    .unwrap();
 ```
 
 Finally hand the raw DMA buffer off to your MCU's parallel peripheral.

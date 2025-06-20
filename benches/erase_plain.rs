@@ -1,7 +1,7 @@
-// Run with:  cargo bench --bench clear_latched
+// Run with:  cargo bench --bench clear_plain
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use hub75_framebuffer::latched::DmaFrameBuffer;
+use hub75_framebuffer::plain::DmaFrameBuffer;
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -23,26 +23,23 @@ fn configure_criterion() -> Criterion {
         .significance_level(0.05)
 }
 
-fn clear_latched(c: &mut Criterion) {
-    let mut group = c.benchmark_group("clear_latched");
+fn erase_plain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Plain Implementation");
     group.throughput(Throughput::Elements(
         (ROWS * COLS * FRAME_COUNT * ITERATIONS) as u64,
     ));
 
-    group.bench_function("latched_dma_framebuffer_clear", |b| {
+    group.bench_function("erase", |b| {
         // Create a formatted framebuffer once
         let mut fb = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
 
         b.iter(|| {
-            // Benchmark multiple clear operations to make measurements longer and more stable
-            for _ in 0..ITERATIONS {
-                black_box(&mut fb).clear();
-            }
+            black_box(&mut fb).erase();
         });
     });
 
     group.finish();
 }
 
-criterion_group!(name = benches; config = configure_criterion(); targets = clear_latched);
+criterion_group!(name = benches; config = configure_criterion(); targets = erase_plain);
 criterion_main!(benches);
