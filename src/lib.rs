@@ -66,14 +66,29 @@
 //! hub75-framebuffer = { version = "0.1", features = ["skip-black-pixels"] }
 //! ```
 //!
-//! ### `esp-hal-dma` Feature
-//! Enables DMA integration when using the `esp-hal` crate for ESP32 development.
-//! This feature switches the `ReadBuffer` trait implementation from `embedded-dma`
-//! to `esp-hal::dma`.
+//! ### `esp-hal-dma` Feature (required when using `esp-hal`)
+//! **Required** when using the `esp-hal` crate for ESP32 development. This feature
+//! switches the `ReadBuffer` trait implementation from `embedded-dma` to `esp-hal::dma`.
+//! If you're targeting ESP32 devices with `esp-hal`, you **must** enable this feature
+//! for DMA compatibility.
 //!
-//! ### `esp32-ordering` Feature  
-//! Adjusts pixel bit ordering to work around quirks in the ESP32's I²S peripheral.
-//! Enable this when targeting the original ESP32 chip specifically.
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.1", features = ["esp-hal-dma"] }
+//! esp-hal = "0.20"
+//! ```
+//!
+//! ### `esp32-ordering` Feature (required for original ESP32 only)
+//! **Required** when targeting the original ESP32 chip (not ESP32-S3 or other variants).
+//! This feature adjusts byte ordering to accommodate the quirky requirements of the
+//! ESP32's I²S peripheral in 8-bit and 16-bit modes. The original ESP32 has different
+//! byte ordering requirements compared to other ESP32 variants (S2, S3, C3, etc.),
+//! which do **not** need this feature.
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.1", features = ["esp32-ordering"] }
+//! ```
 //!
 //! ### `defmt` Feature
 //! Implements `defmt::Format` for framebuffer types so they can be emitted with

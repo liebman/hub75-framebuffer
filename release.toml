@@ -1,6 +1,8 @@
 allow-branch = ["main"]
 pre-release-replacements = [
-  {file="README.md", search="hub75-framebuffer = .*", replace="{{crate_name}} = \"{{version}}\""},
+  {file="README.md", search="hub75-framebuffer = \"[^\"]*\"", replace="{{crate_name}} = \"{{version}}\""},
+  {file="README.md", search="hub75-framebuffer = \\{ version = \"[^\"]*\"", replace="{{crate_name}} = { version = \"{{version}}\""},
+  {file="src/lib.rs", search="hub75-framebuffer = \\{ version = \"[^\"]*\"", replace="{{crate_name}} = { version = \"{{version}}\""},
   {file="CHANGELOG.md", search="Unreleased", replace="{{version}}"},
   {file="CHANGELOG.md", search="\\.\\.\\.HEAD", replace="...{{tag_name}}", exactly=1},
   {file="CHANGELOG.md", search="ReleaseDate", replace="{{date}}"},
