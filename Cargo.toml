@@ -46,19 +46,19 @@ criterion = "0.6"
 bench = false
 
 [[bench]]
-name = "set_pixel_latched"
-harness = false
-
-[[bench]]
 name = "set_pixel_plain"
 harness = false
 
 [[bench]]
-name = "clear_plain"
+name = "set_pixel_latched"
 harness = false
 
 [[bench]]
-name = "clear_latched"
+name = "erase_plain"
+harness = false
+
+[[bench]]
+name = "erase_latched"
 harness = false
 
 [[bench]]

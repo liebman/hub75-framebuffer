@@ -94,7 +94,7 @@ fn render_text_benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let mut fb = TestFrameBuffer::new();
                     for _ in 0..iterations {
-                        fb.clear();
+                        fb.erase();
                         black_box(draw_text_baseline(
                             black_box(&mut fb),
                             black_box(origin),
@@ -115,7 +115,7 @@ fn render_text_benchmark(c: &mut Criterion) {
                 b.iter(|| {
                     let mut fb = TestFrameBuffer::new();
                     for _ in 0..iterations {
-                        fb.clear();
+                        fb.erase();
                         black_box(draw_text_optimised(
                             black_box(&mut fb),
                             black_box(origin),

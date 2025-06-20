@@ -79,9 +79,6 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 //!
 //! let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
 //!
-//! // Clear the framebuffer
-//! framebuffer.clear();
-//!
 //! // Draw a red rectangle
 //! Rectangle::new(Point::new(10, 10), Size::new(20, 20))
 //!     .into_styled(PrimitiveStyle::with_fill(Color::RED))
@@ -576,7 +573,7 @@ impl<
         }
     }
 
-    /// Clear pixel colors while preserving control bits.
+    /// Erase pixel colors while preserving control bits.
     /// This is much faster than `format()` and is the typical way to clear the display.
     /// # Example
     /// ```rust,no_run
@@ -590,10 +587,10 @@ impl<
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// // ... draw some pixels ...
-    /// framebuffer.clear(); // Fast clear of pixel data
+    /// framebuffer.erase();
     /// ```
     #[inline]
-    pub fn clear(&mut self) {
+    pub fn erase(&mut self) {
         for frame in &mut self.frames {
             frame.clear_colors();
         }
@@ -612,7 +609,6 @@ impl<
     /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
     ///
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
-    /// framebuffer.clear();
     /// framebuffer.set_pixel(Point::new(10, 10), Color::RED);
     /// ```
     pub fn set_pixel(&mut self, p: Point, color: Color) {
@@ -1479,7 +1475,6 @@ mod tests {
     #[test]
     fn test_color_values() {
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Test different color values
         let colors = [
@@ -1618,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear() {
+    fn test_erase() {
         let mut fb = TestFrameBuffer::new();
 
         // Set some pixels
@@ -1632,8 +1627,8 @@ mod tests {
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
         assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].grn1(), true);
 
-        // Clear
-        fb.clear();
+        // erase
+        fb.erase();
 
         // Verify pixels are cleared but control bits are preserved
         assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
@@ -1871,7 +1866,6 @@ mod tests {
         let lower_right = Point::new(TEST_COLS as i32 - CHAR_W, TEST_ROWS as i32 - CHAR_H);
 
         let mut fb = TestFrameBuffer::new();
-        fb.clear();
 
         // Verify glyph in the upper-left corner.
         verify_glyph_at(&mut fb, upper_left);
