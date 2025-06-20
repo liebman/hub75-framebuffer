@@ -75,7 +75,6 @@
 //! ```toml
 //! [dependencies]
 //! hub75-framebuffer = { version = "0.2.0", features = ["esp-hal-dma"] }
-//! esp-hal = "0.20"
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)

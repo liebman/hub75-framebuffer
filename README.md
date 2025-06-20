@@ -48,7 +48,6 @@ Add the dependency to your `Cargo.toml`:
 ```toml
 [dependencies]
 hub75-framebuffer = "0.2.0"
-embedded-graphics = "0.8"
 ```
 
 ### Choose your parameters
@@ -97,7 +96,6 @@ Finally hand the raw DMA buffer off to your MCU's parallel peripheral.
 ```toml
 [dependencies]
 hub75-framebuffer = { version = "0.2.0", features = ["esp-hal-dma"] }
-esp-hal = "0.20"
 ```
 
 ### `esp32-ordering` (required for original ESP32 only)
