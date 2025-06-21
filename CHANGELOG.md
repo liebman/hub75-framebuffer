@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-* almost double(!) performance of the set_pixel in the plain and latched `DmaFrameBuffers` (#2)
+* almost double(!) performance of the set_pixel in the plain and latched
+  `DmaFrameBuffers` (#2)
 * Renamed feature `esp-dma` ➜ `esp-hal-dma`.
 
 ## [0.1.0] - 2025-06-14
