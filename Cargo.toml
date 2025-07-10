@@ -26,7 +26,7 @@ defmt = { version = "1.0.1", optional = true }
 embed-doc-image = { version = "0.1.4", optional = true }
 embedded-dma = "0.2.0"
 embedded-graphics = { version = "0.8.1" }
-esp-hal = { version = "=1.0.0-beta.1", features = ["unstable"], optional = true }
+esp-hal = { version = "=1.0.0-beta.1", features = ["requires-unstable"], optional = true }
 
 [features]
 default = []
@@ -76,3 +76,6 @@ harness = false
 
 [package.metadata.docs.rs]
 features = ["doc-images"]
+
+[patch.crates-io]
+esp-hal          = { git = "https://github.com/esp-rs/esp-hal.git", branch = "main" }
