@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2025-07-16
 
+* update to `esp-hal` `1.0.0-rc.1` [#9](https://github.com/liebman/hub75-framebuffer/pull/9)
+
 ## [0.2.0] - 2025-06-20
 
 ### ⚠️ Breaking
