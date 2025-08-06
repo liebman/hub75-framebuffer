@@ -145,13 +145,6 @@ use super::WordSize;
 
 const BLANKING_DELAY: usize = 1;
 
-// Pre-computed lookup table for all possible row addresses (0-31)
-// This eliminates the need to compute addresses at runtime
-const ADDR_TABLE: [u16; 32] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-    26, 27, 28, 29, 30, 31,
-];
-
 /// Creates a pre-computed data template for a row with the specified addresses.
 /// This template contains all the timing and control signals but no pixel data.
 #[inline]
@@ -161,7 +154,7 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
 
     while i < COLS {
         let mut entry = Entry::new();
-        entry.0 = ADDR_TABLE[prev_addr as usize];
+        entry.0 = prev_addr as u16;
 
         // Apply timing control based on position
         if i == 1 {
@@ -170,7 +163,7 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
             // output_enable already false from initialization
         } else if i == COLS - 1 {
             entry.0 |= 0b0010_0000; // set latch bit
-            entry.0 = (entry.0 & !0b0001_1111) | ADDR_TABLE[addr as usize]; // set new address
+            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // set new address
         } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
             entry.0 |= 0b1_0000_0000; // set output_enable bit
         }
