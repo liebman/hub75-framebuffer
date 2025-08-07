@@ -112,6 +112,7 @@ use esp_hal::dma::ReadBuffer;
 
 pub mod latched;
 pub mod plain;
+pub mod tiling;
 
 /// Color type used in the framebuffer
 pub type Color = Rgb888;
