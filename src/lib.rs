@@ -107,6 +107,7 @@
 use embedded_dma::ReadBuffer;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
+use embedded_graphics::prelude::Point;
 #[cfg(feature = "esp-hal-dma")]
 use esp_hal::dma::ReadBuffer;
 
@@ -203,6 +204,36 @@ pub trait MutableFrameBuffer<
     FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
     + DrawTarget<Color = Color, Error = core::convert::Infallible>
 {
+}
+
+/// Trait for all operations a user may want to call on a framebuffer.
+///
+/// # Type Parameters
+///
+/// * `ROWS` - Total number of rows in the display
+/// * `COLS` - Number of columns in the display
+/// * `NROWS` - Number of rows processed in parallel
+/// * `BITS` - Number of bits per color channel
+/// * `FRAME_COUNT` - Number of frames needed for BCM
+pub trait FrameBufferUser<
+    const ROWS: usize,
+    const COLS: usize,
+    const NROWS: usize,
+    const BITS: u8,
+    const FRAME_COUNT: usize,
+>: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>{
+
+    /// Format the framebuffer, setting up all control bits and clearing pixel data.
+    /// This method does a full format of all control bits and clears all pixel data.
+    /// Normally you don't need to call this as `new()` automatically formats the framebuffer.
+    fn format(&mut self);
+
+    /// Erase pixel colors while preserving control bits.
+    /// This is much faster than `format()` and is the typical way to clear the display.
+    fn erase(&mut self);
+
+    /// Set a pixel in the framebuffer.
+    fn set_pixel(&mut self, p: Point, color: Color);
 }
 
 #[cfg(test)]

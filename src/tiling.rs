@@ -1,10 +1,19 @@
 //! For tiling multiple displays together in various grid arrangements
-//! They have to be tiles together
+//! They have to be tiles together in some specific supported grid layouts.
+//! Currently supported layouts:
+//! - [ChainTopRightDown]
+//!
+//! To write to those panels the [TiledFrameBuffer] can be used.
+//! A usage example can be found at that structs documentation.
 
-use core::convert::Infallible;
+use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{Color};
-use embedded_graphics::prelude::{PixelColor};
+use crate::{Color, FrameBuffer, FrameBufferUser, WordSize};
+#[cfg(not(feature = "esp-hal-dma"))]
+use embedded_dma::ReadBuffer;
+use embedded_graphics::prelude::{PixelColor, Point};
+#[cfg(feature = "esp-hal-dma")]
+use esp_hal::dma::ReadBuffer;
 
 /// Computes the number of columns needed if the displays are bing tiled together.
 /// # Arguments
@@ -16,11 +25,15 @@ use embedded_graphics::prelude::{PixelColor};
 /// # Returns
 ///
 /// Number of columns needed internally for `DmaFrameBuffer`
-pub const fn compute_tiled_cols(cols: usize, num_panels_wide: usize, num_panels_high: usize) -> usize {
+pub const fn compute_tiled_cols(
+    cols: usize,
+    num_panels_wide: usize,
+    num_panels_high: usize,
+) -> usize {
     cols * num_panels_wide * num_panels_high
 }
 
-/// Trait for pixel remappers
+/// Trait for pixel re-mappers
 ///
 /// Implementors of this trait will remap x,y coordinates from a
 /// virtual panel to the actual framebuffer used to drive the panels
@@ -31,24 +44,36 @@ pub const fn compute_tiled_cols(cols: usize, num_panels_wide: usize, num_panels_
 /// * `PANEL_COLS` - Number of columns in a single panel
 /// * `TILE_ROWS` - Number of panels stacked vertically
 /// * `TILE_COLS` - Number of panels stacked horizontally
-pub trait PixelRemapper<
-    const PANEL_ROWS: usize,
-    const PANEL_COLS: usize,
-    const TILE_ROWS: usize,
-    const TILE_COLS: usize,
->
-{
+pub trait PixelRemapper {
     /// Number of rows in the virtual panel
-    const VIRT_ROWS: usize = PANEL_ROWS * TILE_ROWS;
+    const VIRT_ROWS: usize;
     /// Number of columns in the virtual panel
-    const VIRT_COLS: usize = PANEL_COLS * TILE_COLS;
+    const VIRT_COLS: usize;
     /// Number of rows in the actual framebuffer
-    const FB_ROWS: usize = PANEL_ROWS;
+    const FB_ROWS: usize;
     /// Number of columns in the actual framebuffer
-    const FB_COLS: usize = PANEL_COLS * TILE_COLS * TILE_ROWS;
+    const FB_COLS: usize;
 
     /// Remap a virtual pixel to a framebuffer pixel
-    fn remap<C: PixelColor>(pixel: embedded_graphics::Pixel<C>) -> embedded_graphics::Pixel<C>;
+    #[inline]
+    fn remap<C: PixelColor>(mut pixel: embedded_graphics::Pixel<C>) -> embedded_graphics::Pixel<C> {
+        let (re_x, re_y) = Self::remap_xy(pixel.0.x as usize, pixel.0.y as usize);
+        pixel.0.x = re_x as i32;
+        pixel.0.y = re_y as i32;
+        pixel
+    }
+
+    /// Remap a virtual point to a framebuffer point
+    #[inline]
+    fn remap_point(mut point: Point) -> Point {
+        let (re_x, re_y) = Self::remap_xy(point.x as usize, point.y as usize);
+        point.x = re_x as i32;
+        point.y = re_y as i32;
+        point
+    }
+
+    /// Remap an x,y coordinate to a framebuffer pixel
+    fn remap_xy(x: usize, y: usize) -> (usize, usize);
 
     /// Size of the virtual panel
     #[inline]
@@ -91,33 +116,24 @@ impl<
         const PANEL_COLS: usize,
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
-    > ChainTopRightDown<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
+    > PixelRemapper for ChainTopRightDown<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
 {
-    /// Create a new panel chain
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+    const VIRT_ROWS: usize = PANEL_ROWS * TILE_ROWS;
+    const VIRT_COLS: usize = PANEL_COLS * TILE_COLS;
+    const FB_ROWS: usize = PANEL_ROWS;
+    const FB_COLS: usize = PANEL_COLS * TILE_ROWS * TILE_COLS;
 
-impl<
-        const PANEL_ROWS: usize,
-        const PANEL_COLS: usize,
-        const TILE_ROWS: usize,
-        const TILE_COLS: usize,
-    > PixelRemapper<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
-    for ChainTopRightDown<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
-{
-    fn remap<C: PixelColor>(mut pixel: embedded_graphics::Pixel<C>) -> embedded_graphics::Pixel<C> {
-        let row = TILE_ROWS as i32 -  pixel.0.y / PANEL_ROWS as i32 - 1;
+    fn remap_xy(x: usize, y: usize) -> (usize, usize) {
+        let row = TILE_ROWS - y / PANEL_ROWS - 1;
         if row % 2 == 1 {
             // panel is upside down
-            pixel.0.x = Self::FB_COLS as i32 - pixel.0.x - (row * Self::VIRT_COLS as i32) - 1;
-            pixel.0.y = PANEL_ROWS as i32 - 1 - (pixel.0.y % PANEL_ROWS as i32);
+            (
+                Self::FB_COLS - x - (row * Self::VIRT_COLS) - 1,
+                PANEL_ROWS - 1 - (y % PANEL_ROWS),
+            )
         } else {
-            pixel.0.x = (row * Self::VIRT_COLS as i32) + pixel.0.x;
-            pixel.0.y = pixel.0.y % PANEL_ROWS as i32;
+            ((row * Self::VIRT_COLS) + x, y % PANEL_ROWS)
         }
-        pixel
     }
 }
 
@@ -125,73 +141,153 @@ impl<
 ///
 /// This is a wrapper around an actual framebuffer implementation which can be used to tile multiple
 /// LED matrices together by using a certain pixel remapping strategy.
+///
+/// # Type Parameters
+/// - `F` - The type of the underlying framebuffer which will drive the display
+/// - `M` - The pixel remapping strategy (see implementers of [PixelRemapper]) to use to map the virtual framebuffer to the actual framebuffer
+/// - `PANEL_ROWS` - Number of rows in a single panel
+/// - `PANEL_COLS` - Number of columns in a single panel
+/// - `NROWS`: Number of rows per scan (typically half of ROWS)
+/// - `BITS`: Color depth (1-8 bits)
+/// - `FRAME_COUNT`: Number of frames used for Binary Code Modulation
+/// * `TILE_ROWS` - Number of panels stacked vertically
+/// * `TILE_COLS` - Number of panels stacked horizontally
+/// * `FB_COLS` - Number of columns that the actual framebuffer must have to drive all display
+///
 /// # Example
 /// ```rust
-/// use hub75_framebuffer::compute_frame_count;
-/// use hub75_framebuffer::compute_rows;
+/// use hub75_framebuffer::{compute_frame_count, compute_rows};
 /// use hub75_framebuffer::plain::DmaFrameBuffer;
-/// use hub75_framebuffer::tiling::{TiledFrameBuffer, ChainTopRightDown};
+/// use hub75_framebuffer::tiling::{TiledFrameBuffer, ChainTopRightDown, compute_tiled_cols};
 ///
 /// const TILED_COLS: usize = 3;
 /// const TILED_ROWS: usize = 3;
 /// const ROWS: usize = 32;
 /// const PANEL_COLS: usize = 64;
-/// const COLS: usize = PANEL_COLS * TILED_ROWS * TILED_COLS;
-/// const BITS: u8 = 4;
+/// const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+/// const BITS: u8 = 2;
 /// const NROWS: usize = compute_rows(ROWS);
 /// const FRAME_COUNT: usize = compute_frame_count(BITS);
 ///
-/// type FBType = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
-/// type PanelChain = ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>;
+/// type FBType = DmaFrameBuffer<ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>;
+/// type TiledFBType = TiledFrameBuffer<
+///     FBType,
+///     ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+///     ROWS,
+///     PANEL_COLS,
+///     NROWS,
+///     BITS,
+///     FRAME_COUNT,
+///     TILED_ROWS,
+///     TILED_COLS,
+///     FB_COLS,
+/// >;
 ///
-/// let mut fb = FBType::new();
-/// let mut fb = TiledFrameBuffer::new(&mut fb, PanelChain::new());
+/// let mut fb = TiledFBType::new();
 ///
 /// // Now fb is ready to be used and can be treated like one big canvas (192*96 pixels in this example)
-/// // The tiles framebuffer does intentionally not reimplement any functions of the underlying framebuffer
-/// // If you need to access them you may use `fb.0`
 /// ```
-pub struct TiledFrameBuffer<'a,
+pub struct TiledFrameBuffer<
     F,
-    M,
+    M: PixelRemapper,
     const PANEL_ROWS: usize,
     const PANEL_COLS: usize,
+    const NROWS: usize,
+    const BITS: u8,
+    const FRAME_COUNT: usize,
     const TILE_ROWS: usize,
     const TILE_COLS: usize,
->(pub &'a mut F, M);
+    const FB_COLS: usize,
+>(F, PhantomData<M>);
 
-impl<'a,
-        F,
-        M,
+impl<
+        F: Default,
+        M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
-    > TiledFrameBuffer<'a, F, M, PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
-where
-    F: embedded_graphics::draw_target::DrawTarget,
-    M: PixelRemapper<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>,
+        const FB_COLS: usize,
+    >
+    TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
 {
     /// Create a new "virtual display" that takes ownership of the underlying framebuffer
-    /// an remaps any pixels written to it to the correct locations of the underlying framebuffer
+    /// and remaps any pixels written to it to the correct locations of the underlying framebuffer
     /// based on the given PixelRemapper
-    pub fn new(fb: &'a mut F, mapper: M) -> Self {
-        Self(fb, mapper)
+    pub fn new() -> Self {
+        Self(F::default(), PhantomData)
     }
 }
 
-impl<'a,
-        F,
-        M,
+
+impl<
+        F: Default,
+        M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > Default for
+    TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<
+        F: embedded_graphics::draw_target::DrawTarget<Error = Infallible, Color = Color>,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
     > embedded_graphics::draw_target::DrawTarget
-    for TiledFrameBuffer<'a, F, M, PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
-where
-    F: embedded_graphics::draw_target::DrawTarget<Color = Color, Error = Infallible>,
-    M: PixelRemapper<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>,
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
 {
     type Color = Color;
     type Error = Infallible;
@@ -204,17 +300,30 @@ where
     }
 }
 
-impl<'a,
-        F,
-        M,
+impl<
+        F: embedded_graphics::draw_target::DrawTarget<Error = Infallible, Color = Color>,
+        M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
+        const FB_COLS: usize,
     > embedded_graphics::prelude::OriginDimensions
-    for TiledFrameBuffer<'a, F, M, PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
-where
-    M: PixelRemapper<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>,
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
 {
     fn size(&self) -> embedded_graphics::prelude::Size {
         embedded_graphics::prelude::Size::new(
@@ -224,6 +333,141 @@ where
     }
 }
 
+impl<
+        F: FrameBufferUser<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > FrameBufferUser<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    #[inline]
+    fn erase(&mut self) {
+        self.0.erase();
+    }
+
+    #[inline]
+    fn format(&mut self) {
+        self.0.format();
+    }
+
+    #[inline]
+    fn set_pixel(&mut self, p: Point, color: Color) {
+        self.0.set_pixel(M::remap_point(p), color);
+    }
+}
+
+#[cfg(not(feature = "esp-hal-dma"))]
+unsafe impl<
+        T,
+        F: ReadBuffer<Word = T>,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > ReadBuffer
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    type Word = T;
+
+    unsafe fn read_buffer(&self) -> (*const T, usize) {
+        self.0.read_buffer()
+    }
+}
+
+#[cfg(feature = "esp-hal-dma")]
+unsafe impl<
+        F: ReadBuffer,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > ReadBuffer
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    unsafe fn read_buffer(&self) -> (*const u8, usize) {
+        self.0.read_buffer()
+    }
+}
+
+impl<
+        F: ReadBuffer,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    fn get_word_size(&self) -> WordSize {
+        WordSize::Sixteen
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -239,7 +483,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 3, 3>;
         let virt_size = PanelChain::virtual_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL*3, COLS_IN_PANEL*3));
+        assert_eq!(virt_size, (ROWS_IN_PANEL * 3, COLS_IN_PANEL * 3));
     }
 
     #[test]
@@ -248,7 +492,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 5, 3>;
         let virt_size = PanelChain::virtual_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL*5, COLS_IN_PANEL*3));
+        assert_eq!(virt_size, (ROWS_IN_PANEL * 5, COLS_IN_PANEL * 3));
     }
 
     #[test]
@@ -257,7 +501,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 3, 1>;
         let virt_size = PanelChain::virtual_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL*3, COLS_IN_PANEL));
+        assert_eq!(virt_size, (ROWS_IN_PANEL * 3, COLS_IN_PANEL));
     }
 
     #[test]
@@ -266,7 +510,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 3, 3>;
         let virt_size = PanelChain::fb_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL*9));
+        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL * 9));
     }
 
     #[test]
@@ -275,7 +519,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 5, 3>;
         let virt_size = PanelChain::fb_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL*15));
+        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL * 15));
     }
 
     #[test]
@@ -284,7 +528,7 @@ mod tests {
         const COLS_IN_PANEL: usize = 64;
         type PanelChain = ChainTopRightDown<ROWS_IN_PANEL, COLS_IN_PANEL, 3, 1>;
         let virt_size = PanelChain::fb_size();
-        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL*3));
+        assert_eq!(virt_size, (ROWS_IN_PANEL, COLS_IN_PANEL * 3));
     }
 
     #[test]
