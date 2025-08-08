@@ -1,9 +1,9 @@
 //! For tiling multiple displays together in various grid arrangements
 //! They have to be tiles together in some specific supported grid layouts.
 //! Currently supported layouts:
-//! - [ChainTopRightDown]
+//! - [`ChainTopRightDown`]
 //!
-//! To write to those panels the [TiledFrameBuffer] can be used.
+//! To write to those panels the [`TiledFrameBuffer`] can be used.
 //! A usage example can be found at that structs documentation.
 
 use core::{convert::Infallible, marker::PhantomData};
@@ -25,6 +25,7 @@ use esp_hal::dma::ReadBuffer;
 /// # Returns
 ///
 /// Number of columns needed internally for `DmaFrameBuffer`
+#[must_use]
 pub const fn compute_tiled_cols(
     cols: usize,
     num_panels_wide: usize,
@@ -57,18 +58,18 @@ pub trait PixelRemapper {
     /// Remap a virtual pixel to a framebuffer pixel
     #[inline]
     fn remap<C: PixelColor>(mut pixel: embedded_graphics::Pixel<C>) -> embedded_graphics::Pixel<C> {
-        let (re_x, re_y) = Self::remap_xy(pixel.0.x as usize, pixel.0.y as usize);
-        pixel.0.x = re_x as i32;
-        pixel.0.y = re_y as i32;
+        pixel.0 = Self::remap_point(pixel.0);
         pixel
     }
 
     /// Remap a virtual point to a framebuffer point
     #[inline]
+    #[must_use]
     fn remap_point(mut point: Point) -> Point {
         let (re_x, re_y) = Self::remap_xy(point.x as usize, point.y as usize);
-        point.x = re_x as i32;
-        point.y = re_y as i32;
+        // If larger than u16, it is fair to assume that the point will be off the screen
+        point.x = i32::from(re_x as u16);
+        point.y = i32::from(re_y as u16);
         point
     }
 
@@ -77,12 +78,14 @@ pub trait PixelRemapper {
 
     /// Size of the virtual panel
     #[inline]
+    #[must_use]
     fn virtual_size() -> (usize, usize) {
         (Self::VIRT_ROWS, Self::VIRT_COLS)
     }
 
     /// Size of the framebuffer that this remaps to
     #[inline]
+    #[must_use]
     fn fb_size() -> (usize, usize) {
         (Self::FB_ROWS, Self::FB_COLS)
     }
@@ -90,7 +93,7 @@ pub trait PixelRemapper {
 
 /// Chaining strategy for tiled panels
 ///
-/// This type should be provided to the [TiledFrameBuffer] as a type argument.
+/// This type should be provided to the [`TiledFrameBuffer`] as a type argument.
 /// Take a look at its documentation for more details
 ///
 /// When looking at the front, panels are chained together starting at the top right, chaining to the
@@ -144,7 +147,7 @@ impl<
 ///
 /// # Type Parameters
 /// - `F` - The type of the underlying framebuffer which will drive the display
-/// - `M` - The pixel remapping strategy (see implementers of [PixelRemapper]) to use to map the virtual framebuffer to the actual framebuffer
+/// - `M` - The pixel remapping strategy (see implementers of [`PixelRemapper`]) to use to map the virtual framebuffer to the actual framebuffer
 /// - `PANEL_ROWS` - Number of rows in a single panel
 /// - `PANEL_COLS` - Number of columns in a single panel
 /// - `NROWS`: Number of rows per scan (typically half of ROWS)
@@ -227,12 +230,12 @@ impl<
 {
     /// Create a new "virtual display" that takes ownership of the underlying framebuffer
     /// and remaps any pixels written to it to the correct locations of the underlying framebuffer
-    /// based on the given PixelRemapper
+    /// based on the given `PixelRemapper`
+    #[must_use]
     pub fn new() -> Self {
         Self(F::default(), PhantomData)
     }
 }
-
 
 impl<
         F: Default,
@@ -245,8 +248,8 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > Default for
-    TiledFrameBuffer<
+    > Default
+    for TiledFrameBuffer<
         F,
         M,
         PANEL_ROWS,

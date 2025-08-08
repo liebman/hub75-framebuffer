@@ -172,13 +172,13 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 use core::convert::Infallible;
 
 use super::Color;
+use crate::FrameBufferUser;
 use bitfield::bitfield;
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
-use crate::FrameBufferUser;
 #[cfg(feature = "esp-hal-dma")]
 use esp_hal::dma::ReadBuffer;
 
@@ -662,7 +662,8 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBufferUser<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferUser<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[inline]
     fn erase(&mut self) {

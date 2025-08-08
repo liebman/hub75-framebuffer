@@ -221,8 +221,8 @@ pub trait FrameBufferUser<
     const NROWS: usize,
     const BITS: u8,
     const FRAME_COUNT: usize,
->: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>{
-
+>: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+{
     /// Format the framebuffer, setting up all control bits and clearing pixel data.
     /// This method does a full format of all control bits and clears all pixel data.
     /// Normally you don't need to call this as `new()` automatically formats the framebuffer.
