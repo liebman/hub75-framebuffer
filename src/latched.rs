@@ -172,6 +172,7 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 use core::convert::Infallible;
 
 use super::Color;
+use crate::FrameBufferUser;
 use bitfield::bitfield;
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
@@ -652,6 +653,31 @@ impl<
                 frame_idx < blue_frames,
             );
         }
+    }
+}
+
+impl<
+        const ROWS: usize,
+        const COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+    > FrameBufferUser<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+{
+    #[inline]
+    fn erase(&mut self) {
+        self.erase();
+    }
+
+    #[inline]
+    fn format(&mut self) {
+        self.format();
+    }
+
+    #[inline]
+    fn set_pixel(&mut self, p: Point, color: Color) {
+        self.set_pixel(p, color);
     }
 }
 
@@ -1800,7 +1826,7 @@ mod tests {
     const CHAR_W: i32 = 6;
     const CHAR_H: i32 = 10;
 
-    /// Draws the glyph 'A' at `origin` and verifies every pixel against a software reference.  
+    /// Draws the glyph 'A' at `origin` and verifies every pixel against a software reference.
     /// Re-usable for different panel locations.
     fn verify_glyph_at(fb: &mut TestFrameBuffer, origin: Point) {
         use embedded_graphics::mock_display::MockDisplay;
