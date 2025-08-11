@@ -215,7 +215,7 @@ pub trait MutableFrameBuffer<
 /// * `NROWS` - Number of rows processed in parallel
 /// * `BITS` - Number of bits per color channel
 /// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait FrameBufferUser<
+pub trait FrameBufferOperations<
     const ROWS: usize,
     const COLS: usize,
     const NROWS: usize,
@@ -223,11 +223,6 @@ pub trait FrameBufferUser<
     const FRAME_COUNT: usize,
 >: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    /// Format the framebuffer, setting up all control bits and clearing pixel data.
-    /// This method does a full format of all control bits and clears all pixel data.
-    /// Normally you don't need to call this as `new()` automatically formats the framebuffer.
-    fn format(&mut self);
-
     /// Erase pixel colors while preserving control bits.
     /// This is much faster than `format()` and is the typical way to clear the display.
     fn erase(&mut self);

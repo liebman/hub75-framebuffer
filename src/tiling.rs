@@ -8,10 +8,10 @@
 
 use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{Color, FrameBuffer, FrameBufferUser, WordSize};
+use crate::{Color, FrameBuffer, FrameBufferOperations, WordSize};
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
-use embedded_graphics::prelude::{PixelColor, Point};
+use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
 #[cfg(feature = "esp-hal-dma")]
 use esp_hal::dma::ReadBuffer;
 
@@ -66,6 +66,10 @@ pub trait PixelRemapper {
     #[inline]
     #[must_use]
     fn remap_point(mut point: Point) -> Point {
+        if point.x < 0 || point.y < 0 {
+            // Skip remapping points which are off the screen
+            return point;
+        }
         let (re_x, re_y) = Self::remap_xy(point.x as usize, point.y as usize);
         // If larger than u16, it is fair to assume that the point will be off the screen
         point.x = i32::from(re_x as u16);
@@ -268,7 +272,7 @@ impl<
 }
 
 impl<
-        F: embedded_graphics::draw_target::DrawTarget<Error = Infallible, Color = Color>,
+        F: DrawTarget<Error = Infallible, Color = Color>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -278,7 +282,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > embedded_graphics::draw_target::DrawTarget
+    > DrawTarget
     for TiledFrameBuffer<
         F,
         M,
@@ -304,7 +308,7 @@ impl<
 }
 
 impl<
-        F: embedded_graphics::draw_target::DrawTarget<Error = Infallible, Color = Color>,
+        F: DrawTarget<Error = Infallible, Color = Color>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -314,7 +318,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > embedded_graphics::prelude::OriginDimensions
+    > OriginDimensions
     for TiledFrameBuffer<
         F,
         M,
@@ -328,16 +332,13 @@ impl<
         FB_COLS,
     >
 {
-    fn size(&self) -> embedded_graphics::prelude::Size {
-        embedded_graphics::prelude::Size::new(
-            M::virtual_size().1 as u32,
-            M::virtual_size().0 as u32,
-        )
+    fn size(&self) -> Size {
+        Size::new(M::virtual_size().1 as u32, M::virtual_size().0 as u32)
     }
 }
 
 impl<
-        F: FrameBufferUser<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -347,7 +348,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBufferUser<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
     for TiledFrameBuffer<
         F,
         M,
@@ -364,11 +365,6 @@ impl<
     #[inline]
     fn erase(&mut self) {
         self.0.erase();
-    }
-
-    #[inline]
-    fn format(&mut self) {
-        self.0.format();
     }
 
     #[inline]
@@ -596,5 +592,52 @@ mod tests {
 
         let pixel = PanelChain::remap(Pixel(Point::new(100, 40), Color::RED));
         assert_eq!(pixel.0, Point::new(283, 23));
+    }
+
+    #[test]
+    fn test_pixel_remap_negative_pixel_does_not_remap() {
+        type PanelChain = ChainTopRightDown<32, 64, 3, 3>;
+
+        let pixel = PanelChain::remap(Pixel(Point::new(-5, 40), Color::RED));
+        assert_eq!(pixel.0, Point::new(-5, 40));
+    }
+
+    #[test]
+    fn test_compute_tiled_cols() {
+        assert_eq!(192, compute_tiled_cols(32, 3, 2));
+    }
+
+    #[test]
+    fn test_tiling_framebuffer_canvas_size() {
+        use crate::plain::DmaFrameBuffer;
+        use crate::tiling::{compute_tiled_cols, ChainTopRightDown, TiledFrameBuffer};
+        use crate::{compute_frame_count, compute_rows};
+
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+        const BITS: u8 = 2;
+        const NROWS: usize = compute_rows(ROWS);
+        const FRAME_COUNT: usize = compute_frame_count(BITS);
+
+        type FBType = DmaFrameBuffer<ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>;
+        type TiledFBType = TiledFrameBuffer<
+            FBType,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            NROWS,
+            BITS,
+            FRAME_COUNT,
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >;
+
+        let fb = TiledFBType::new();
+
+        assert_eq!(fb.size(), Size::new(192, 96));
     }
 }

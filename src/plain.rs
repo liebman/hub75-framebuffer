@@ -131,7 +131,7 @@
 
 use core::convert::Infallible;
 
-use crate::FrameBufferUser;
+use crate::FrameBufferOperations;
 use bitfield::bitfield;
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
@@ -611,22 +611,17 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBufferUser<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
     for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[inline]
     fn erase(&mut self) {
-        self.erase();
-    }
-
-    #[inline]
-    fn format(&mut self) {
-        self.format();
+        DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::erase(self);
     }
 
     #[inline]
     fn set_pixel(&mut self, p: Point, color: Color) {
-        self.set_pixel(p, color);
+        DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::set_pixel(self, p, color);
     }
 }
 
