@@ -338,7 +338,8 @@ impl<
 }
 
 impl<
-        F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
+            + FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -439,7 +440,7 @@ unsafe impl<
 }
 
 impl<
-        F: ReadBuffer,
+        F: FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -464,7 +465,7 @@ impl<
     >
 {
     fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
+        self.0.get_word_size()
     }
 }
 
