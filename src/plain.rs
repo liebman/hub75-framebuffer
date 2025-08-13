@@ -1773,4 +1773,51 @@ mod tests {
         verify_glyph_at(&mut fb, upper_left);
         verify_glyph_at(&mut fb, lower_right);
     }
+
+    #[test]
+    fn test_framebuffer_operations_trait_erase() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Set pixels so erase has work to do
+        fb.set_pixel_internal(10, 5, Color::RED);
+        fb.set_pixel_internal(20, 10, Color::GREEN);
+
+        // Explicitly call trait method to hit the FrameBufferOperations impl
+        <TestFrameBuffer as FrameBufferOperations<
+            TEST_ROWS,
+            TEST_COLS,
+            TEST_NROWS,
+            TEST_BITS,
+            TEST_FRAME_COUNT,
+        >>::erase(&mut fb);
+
+        // Verify colors cleared on frame 0
+        let mc10 = get_mapped_index(10);
+        let mc20 = get_mapped_index(20);
+        assert_eq!(fb.frames[0].rows[5].data[mc10].red1(), false);
+        assert_eq!(fb.frames[0].rows[10].data[mc20].grn1(), false);
+
+        // Timing signals preserved: last pixel should have latch
+        let last_col = get_mapped_index(TEST_COLS - 1);
+        assert!(fb.frames[0].rows[0].data[last_col].latch());
+    }
+
+    #[test]
+    fn test_framebuffer_operations_trait_set_pixel() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Explicitly call trait method to hit the FrameBufferOperations impl
+        <TestFrameBuffer as FrameBufferOperations<
+            TEST_ROWS,
+            TEST_COLS,
+            TEST_NROWS,
+            TEST_BITS,
+            TEST_FRAME_COUNT,
+        >>::set_pixel(&mut fb, Point::new(8, 3), Color::BLUE);
+
+        let idx = get_mapped_index(8);
+        assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
+        assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
+        assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+    }
 }
