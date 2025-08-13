@@ -476,6 +476,7 @@ mod tests {
     use embedded_graphics::prelude::*;
 
     use super::*;
+    use core::convert::Infallible;
 
     #[test]
     fn test_virtual_size_function_with_equal_rows_and_cols() {
@@ -640,5 +641,501 @@ mod tests {
         let fb = TiledFBType::new();
 
         assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    // Test helper framebuffer that records calls for verification
+    struct TestFrameBuffer {
+        calls: std::cell::RefCell<std::vec::Vec<Call>>,
+        buf: [u8; 8],
+        word_size: WordSize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Call {
+        Erase,
+        SetPixel { p: Point, color: Color },
+        Draw(std::vec::Vec<(Point, Color)>),
+    }
+
+    impl TestFrameBuffer {
+        fn new(word_size: WordSize) -> Self {
+            Self {
+                calls: std::cell::RefCell::new(std::vec::Vec::new()),
+                buf: [0; 8],
+                word_size,
+            }
+        }
+
+        fn take_calls(&self) -> std::vec::Vec<Call> {
+            core::mem::take(&mut *self.calls.borrow_mut())
+        }
+    }
+
+    impl Default for TestFrameBuffer {
+        fn default() -> Self {
+            Self::new(WordSize::Eight)
+        }
+    }
+
+    impl DrawTarget for TestFrameBuffer {
+        type Color = Color;
+        type Error = Infallible;
+
+        fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+        where
+            I: IntoIterator<Item = Pixel<Self::Color>>,
+        {
+            let v = pixels.into_iter().map(|p| (p.0, p.1)).collect();
+            self.calls.borrow_mut().push(Call::Draw(v));
+            Ok(())
+        }
+    }
+
+    impl OriginDimensions for TestFrameBuffer {
+        fn size(&self) -> Size {
+            Size::new(1, 1)
+        }
+    }
+
+    impl<
+            const ROWS: usize,
+            const COLS: usize,
+            const NROWS: usize,
+            const BITS: u8,
+            const FRAME_COUNT: usize,
+        > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
+    {
+        fn get_word_size(&self) -> WordSize {
+            self.word_size
+        }
+    }
+
+    impl<
+            const ROWS: usize,
+            const COLS: usize,
+            const NROWS: usize,
+            const BITS: u8,
+            const FRAME_COUNT: usize,
+        > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
+    {
+        fn erase(&mut self) {
+            self.calls.borrow_mut().push(Call::Erase);
+        }
+
+        fn set_pixel(&mut self, p: Point, color: Color) {
+            self.calls.borrow_mut().push(Call::SetPixel { p, color });
+        }
+    }
+
+    #[cfg(not(feature = "esp-hal-dma"))]
+    unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
+        type Word = u8;
+
+        unsafe fn read_buffer(&self) -> (*const u8, usize) {
+            (self.buf.as_ptr(), self.buf.len())
+        }
+    }
+
+    #[cfg(feature = "esp-hal-dma")]
+    unsafe impl esp_hal::dma::ReadBuffer for TestFrameBuffer {
+        unsafe fn read_buffer(&self) -> (*const u8, usize) {
+            (self.buf.as_ptr(), self.buf.len())
+        }
+    }
+
+    #[test]
+    fn test_tiled_draw_iter_forwards_with_remap() {
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let mut fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+
+        let input = [
+            Pixel(Point::new(0, 0), Color::RED),
+            Pixel(Point::new(63, 0), Color::GREEN),
+            Pixel(Point::new(64, 0), Color::BLUE),
+            Pixel(Point::new(100, 40), Color::WHITE),
+        ];
+
+        fb.draw_iter(input.into_iter()).unwrap();
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            Call::Draw(v) => {
+                let expected =
+                    [
+                        ChainTopRightDown::<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>::remap(
+                            Pixel(Point::new(0, 0), Color::RED),
+                        ),
+                        ChainTopRightDown::<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>::remap(
+                            Pixel(Point::new(63, 0), Color::GREEN),
+                        ),
+                        ChainTopRightDown::<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>::remap(
+                            Pixel(Point::new(64, 0), Color::BLUE),
+                        ),
+                        ChainTopRightDown::<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>::remap(
+                            Pixel(Point::new(100, 40), Color::WHITE),
+                        ),
+                    ];
+                let expected_points: std::vec::Vec<(Point, Color)> =
+                    expected.iter().map(|p| (p.0, p.1)).collect();
+                assert_eq!(v.as_slice(), expected_points.as_slice());
+            }
+            _ => panic!("expected a Draw call"),
+        }
+    }
+
+    #[test]
+    fn test_tiled_set_pixel_remaps_and_forwards() {
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let mut fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+
+        let p = Point::new(100, 40);
+        fb.set_pixel(p, Color::BLUE);
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 1);
+        match calls.into_iter().next().unwrap() {
+            Call::SetPixel { p: rp, color } => {
+                let expected =
+                    ChainTopRightDown::<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>::remap_point(p);
+                assert_eq!(rp, expected);
+                assert_eq!(color, Color::BLUE);
+            }
+            _ => panic!("expected a SetPixel call"),
+        }
+    }
+
+    #[test]
+    fn test_tiled_erase_forwards() {
+        const TILED_COLS: usize = 2;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let mut fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+        fb.erase();
+        let calls = fb.0.take_calls();
+        assert_eq!(calls, std::vec![Call::Erase]);
+    }
+
+    #[test]
+    fn test_tiled_negative_coordinates_not_remapped() {
+        const TILED_COLS: usize = 2;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let mut fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+
+        // set_pixel path
+        let neg = Point::new(-3, 5);
+        fb.set_pixel(neg, Color::GREEN);
+        // draw_iter path
+        fb.draw_iter(core::iter::once(Pixel(Point::new(10, -2), Color::RED)))
+            .unwrap();
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0], Call::SetPixel { p, .. } if p == neg));
+        match &calls[1] {
+            Call::Draw(v) => {
+                assert_eq!(v.as_slice(), &[(Point::new(10, -2), Color::RED)]);
+            }
+            _ => panic!("expected a Draw call"),
+        }
+    }
+
+    #[test]
+    fn test_tiled_read_buffer_passthrough() {
+        const TILED_COLS: usize = 2;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+
+        let inner_ptr = fb.0.buf.as_ptr();
+        let inner_len = fb.0.buf.len();
+
+        let (ptr, len) = unsafe { fb.read_buffer() };
+        assert_eq!(ptr, inner_ptr);
+        assert_eq!(len, inner_len);
+    }
+
+    #[test]
+    fn test_tiled_get_word_size_passthrough() {
+        const TILED_COLS: usize = 2;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Sixteen),
+            core::marker::PhantomData,
+        );
+        assert_eq!(fb.get_word_size(), WordSize::Sixteen);
+    }
+
+    #[test]
+    fn test_tiled_get_word_size_eight_passthrough() {
+        const TILED_COLS: usize = 2;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+        assert_eq!(fb.get_word_size(), WordSize::Eight);
+    }
+
+    // Remapper that generates very large coordinates to trigger u16 truncation in remap_point
+    struct Huge<
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+    >;
+
+    impl<
+            const PANEL_ROWS: usize,
+            const PANEL_COLS: usize,
+            const TILE_ROWS: usize,
+            const TILE_COLS: usize,
+        > PixelRemapper for Huge<PANEL_ROWS, PANEL_COLS, TILE_ROWS, TILE_COLS>
+    {
+        const VIRT_ROWS: usize = PANEL_ROWS * TILE_ROWS;
+        const VIRT_COLS: usize = PANEL_COLS * TILE_COLS;
+        const FB_ROWS: usize = PANEL_ROWS;
+        const FB_COLS: usize = PANEL_COLS * TILE_ROWS * TILE_COLS;
+
+        fn remap_xy(x: usize, y: usize) -> (usize, usize) {
+            (x + 70_000, y + 70_000)
+        }
+    }
+
+    #[test]
+    fn test_remap_point_truncates_to_u16_range() {
+        const TILED_COLS: usize = 1;
+        const TILED_ROWS: usize = 1;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let mut fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            Huge<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >(
+            TestFrameBuffer::new(WordSize::Eight),
+            core::marker::PhantomData,
+        );
+        fb.set_pixel(Point::new(1, 2), Color::RED);
+
+        let calls = fb.0.take_calls();
+        match calls.into_iter().next().unwrap() {
+            Call::SetPixel { p, color } => {
+                let (rx, ry) = (1usize + 70_000, 2usize + 70_000);
+                let expected = Point::new(i32::from(rx as u16), i32::from(ry as u16));
+                assert_eq!(p, expected);
+                assert_eq!(color, Color::RED);
+            }
+            other => panic!("unexpected call recorded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_more_compute_tiled_cols_cases() {
+        assert_eq!(compute_tiled_cols(64, 1, 4), 256);
+        assert_eq!(compute_tiled_cols(64, 4, 1), 256);
+        assert_eq!(compute_tiled_cols(32, 4, 5), 640);
+    }
+
+    #[test]
+    fn test_tiled_default_and_new_construct() {
+        const TILED_COLS: usize = 4;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let fb_default = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >::default();
+
+        let fb_new = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >::new();
+
+        // Default constructs inner TestFrameBuffer::default() which uses WordSize::Eight
+        assert_eq!(fb_default.get_word_size(), WordSize::Eight);
+        assert_eq!(fb_new.get_word_size(), WordSize::Eight);
+
+        // Size comes from OriginDimensions impl on TiledFrameBuffer (via M::virtual_size)
+        let expected_size = Size::new((PANEL_COLS * TILED_COLS) as u32, (ROWS * TILED_ROWS) as u32);
+        assert_eq!(fb_default.size(), expected_size);
+        assert_eq!(fb_new.size(), expected_size);
+
+        // No calls recorded yet on inner framebuffer
+        assert!(fb_default.0.take_calls().is_empty());
+        assert!(fb_new.0.take_calls().is_empty());
+    }
+
+    #[test]
+    fn test_tiled_origin_dimensions_matches_virtual_size() {
+        const TILED_COLS: usize = 5;
+        const TILED_ROWS: usize = 2;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+
+        let fb = TiledFrameBuffer::<
+            TestFrameBuffer,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+            ROWS,
+            PANEL_COLS,
+            { crate::compute_rows(ROWS) },
+            2,
+            { crate::compute_frame_count(2) },
+            TILED_ROWS,
+            TILED_COLS,
+            FB_COLS,
+        >::new();
+
+        let (virt_rows, virt_cols) = <ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS> as PixelRemapper>::virtual_size();
+        assert_eq!(fb.size(), Size::new(virt_cols as u32, virt_rows as u32));
     }
 }

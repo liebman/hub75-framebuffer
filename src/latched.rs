@@ -1893,4 +1893,64 @@ mod tests {
         // Verify glyph in the lower-right corner.
         verify_glyph_at(&mut fb, lower_right);
     }
+
+    #[test]
+    fn test_framebuffer_operations_trait_erase() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Set a couple of pixels so erase has an effect to clear
+        fb.set_pixel_internal(10, 5, Color::RED);
+        fb.set_pixel_internal(20, 10, Color::GREEN);
+
+        // Call the trait method explicitly to exercise the impl
+        <TestFrameBuffer as FrameBufferOperations<
+            TEST_ROWS,
+            TEST_COLS,
+            TEST_NROWS,
+            TEST_BITS,
+            TEST_FRAME_COUNT,
+        >>::erase(&mut fb);
+
+        // Verify colors are cleared but control bits/timing remain intact on frame 0
+        let mc10 = map_index(10);
+        let mc20 = map_index(20);
+        assert_eq!(fb.frames[0].rows[5].data[mc10].red1(), false);
+        assert_eq!(fb.frames[0].rows[10].data[mc20].grn1(), false);
+
+        // Data entries should still have the same OE pattern and latch should remain false for all
+        let row0 = &fb.frames[0].rows[0];
+        let oe_false_count = row0
+            .data
+            .iter()
+            .filter(|entry| !entry.output_enable())
+            .count();
+        assert_eq!(oe_false_count, 1);
+        assert!(row0.data.iter().all(|e| !e.latch()));
+
+        // Address words should remain precomputed table values
+        for (i, addr) in row0.address.iter().enumerate() {
+            assert_eq!(addr.0, ADDR_TABLE[0][i].0);
+        }
+    }
+
+    #[test]
+    fn test_framebuffer_operations_trait_set_pixel() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Call the trait method explicitly to exercise the impl
+        <TestFrameBuffer as FrameBufferOperations<
+            TEST_ROWS,
+            TEST_COLS,
+            TEST_NROWS,
+            TEST_BITS,
+            TEST_FRAME_COUNT,
+        >>::set_pixel(&mut fb, Point::new(8, 3), Color::BLUE);
+
+        // For BITS=3, BLUE should light blue channel in early frames
+        let idx = map_index(8);
+        assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
+        // Red/Green should be off for BLUE at frame 0
+        assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
+        assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+    }
 }
