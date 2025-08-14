@@ -49,6 +49,14 @@
 //! - Support different color depths through Binary Code Modulation (BCM)
 //! - Implement the `ReadBuffer` trait for DMA compatibility
 //!
+//! ## Multiple Panels
+//! Use [`tiling::TiledFrameBuffer`] to drive several HUB75 panels as one large
+//! virtual display. Combine it with a pixel-remapping policy such as
+//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above
+//! (`plain` or `latched`). The wrapper exposes a single `embedded-graphics`
+//! canvas, so for example a 3 × 3 stack of 64 × 32 panels simply looks like a
+//! 192 × 96 screen while all coordinate translation happens transparently.
+//!
 //! ## Available Feature Flags
 //!
 //! ### `skip-black-pixels` Feature (disabled by default)

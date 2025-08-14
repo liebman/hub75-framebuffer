@@ -39,6 +39,14 @@ documentation contains an extensive primer.
 | `plain`             | none           | 16 bit (14 used) | high       | Simplest, wires exactly like a standard HUB75 matrix. |
 | `latched`           | **external latch gate** (see below) | 8 bit | ×½ of `plain` | Lower memory footprint, but needs a tiny glue-logic board. |
 
+## Multiple Panels
+
+- Use `tiling::TiledFrameBuffer` to drive several HUB75 panels as one large display.
+- Combine it with a pixel-remapping policy like `ChainTopRightDown` and any of
+  the framebuffers above (plain or latched).
+- The wrapper exposes a single `embedded-graphics` canvas, so a 3 × 3 stack of
+  64 × 32 panels simply looks like a 192 × 96 screen while all coordinate translation happens transparently.
+
 ### The latch circuit
 
 The *latched* implementation assumes a small external circuit that holds the

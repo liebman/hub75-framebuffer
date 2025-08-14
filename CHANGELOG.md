@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+* New `tiling::TiledFrameBuffer` wrapper that lets you chain multiple HUB75
+  panels into one large virtual canvas ([#10](https://github.com/liebman/hub75-framebuffer/pull/10))
+
 ## [0.3.0] - 2025-07-16
 
 * update to `esp-hal` `1.0.0-rc.1` [#9](https://github.com/liebman/hub75-framebuffer/pull/9)
