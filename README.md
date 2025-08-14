@@ -68,7 +68,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = "0.3.0"
+hub75-framebuffer = "0.4.0"
 ```
 
 ### Choose your parameters
@@ -122,7 +122,7 @@ to `esp-hal::dma`. If you're targeting ESP32 devices with `esp-hal`, you
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.3.0", features = ["esp-hal-dma"] }
+hub75-framebuffer = { version = "0.4.0", features = ["esp-hal-dma"] }
 ```
 
 ### `esp32-ordering` (required for original ESP32 only)
@@ -134,7 +134,7 @@ ESP32 variants (S2, S3, C3, etc.) do **not** need this feature.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.3.0", features = ["esp32-ordering"] }
+hub75-framebuffer = { version = "0.4.0", features = ["esp32-ordering"] }
 ```
 
 ### `skip-black-pixels`
@@ -157,7 +157,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.3.0", 
+hub75-framebuffer = { version = "0.4.0", 
                       features = ["esp-hal-dma", "esp32-ordering"] }
 ```
 
