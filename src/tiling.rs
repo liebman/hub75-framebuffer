@@ -339,7 +339,7 @@ impl<
 
 impl<
         F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
-            + FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>,
+            + FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -349,7 +349,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBufferOperations<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
     for TiledFrameBuffer<
         F,
         M,
@@ -440,7 +440,7 @@ unsafe impl<
 }
 
 impl<
-        F: FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -450,7 +450,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBuffer<PANEL_ROWS, PANEL_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
     for TiledFrameBuffer<
         F,
         M,
