@@ -71,7 +71,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.4.0", features = ["skip-black-pixels"] }
+//! hub75-framebuffer = { version = "0.4.1", features = ["skip-black-pixels"] }
 //! ```
 //!
 //! ### `esp-hal-dma` Feature (required when using `esp-hal`)
@@ -82,7 +82,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.4.0", features = ["esp-hal-dma"] }
+//! hub75-framebuffer = { version = "0.4.1", features = ["esp-hal-dma"] }
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
@@ -94,7 +94,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.4.0", features = ["esp32-ordering"] }
+//! hub75-framebuffer = { version = "0.4.1", features = ["esp32-ordering"] }
 //! ```
 //!
 //! ### `defmt` Feature
