@@ -111,6 +111,8 @@ pub trait PixelRemapper {
 /// * `PANEL_COLS` - Number of columns in a single panel
 /// * `TILE_ROWS` - Number of panels stacked vertically
 /// * `TILE_COLS` - Number of panels stacked horizontally
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(core::fmt::Debug)]
 pub struct ChainTopRightDown<
     const PANEL_ROWS: usize,
     const PANEL_COLS: usize,
@@ -131,15 +133,18 @@ impl<
     const FB_COLS: usize = PANEL_COLS * TILE_ROWS * TILE_COLS;
 
     fn remap_xy(x: usize, y: usize) -> (usize, usize) {
-        let row = TILE_ROWS - y / PANEL_ROWS - 1;
+        // 0 = top row, 1 = next row, …
+        let row = y / PANEL_ROWS;
+        let base = (TILE_ROWS - 1 - row) * Self::VIRT_COLS;
+
         if row % 2 == 1 {
-            // panel is upside down
+            // this row is mounted upside-down
             (
-                Self::FB_COLS - x - (row * Self::VIRT_COLS) - 1,
-                PANEL_ROWS - 1 - (y % PANEL_ROWS),
+                base + Self::VIRT_COLS - 1 - x, // mirror x across the whole virtual row
+                PANEL_ROWS - 1 - (y % PANEL_ROWS), // flip y within the panel
             )
         } else {
-            ((row * Self::VIRT_COLS) + x, y % PANEL_ROWS)
+            (base + x, y % PANEL_ROWS) // normal orientation
         }
     }
 }
@@ -194,6 +199,8 @@ impl<
 ///
 /// // Now fb is ready to be used and can be treated like one big canvas (192*96 pixels in this example)
 /// ```
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(core::fmt::Debug)]
 pub struct TiledFrameBuffer<
     F,
     M: PixelRemapper,
@@ -1137,5 +1144,83 @@ mod tests {
 
         let (virt_rows, virt_cols) = <ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS> as PixelRemapper>::virtual_size();
         assert_eq!(fb.size(), Size::new(virt_cols as u32, virt_rows as u32));
+    }
+
+    // Expected mapping for ChainTopRightDown (current, correct behavior)
+    fn expected_ctrdd_xy<const PR: usize, const PC: usize, const TR: usize, const TC: usize>(
+        x: usize,
+        y: usize,
+    ) -> (usize, usize) {
+        let row = y / PR;
+        let base = (TR - 1 - row) * (PC * TC);
+        if row % 2 == 1 {
+            (base + (PC * TC) - 1 - x, PR - 1 - (y % PR))
+        } else {
+            (base + x, y % PR)
+        }
+    }
+
+    #[test]
+    fn test_chain_top_right_down_corners_2x3() {
+        const PR: usize = 32;
+        const PC: usize = 64;
+        const TR: usize = 2;
+        const TC: usize = 3;
+        type M = ChainTopRightDown<PR, PC, TR, TC>;
+
+        for r in 0..TR {
+            for c in 0..TC {
+                let x0 = c * PC;
+                let y0 = r * PR;
+                let corners = [
+                    (x0, y0),                   // TL
+                    (x0 + PC - 1, y0),          // TR
+                    (x0, y0 + PR - 1),          // BL
+                    (x0 + PC - 1, y0 + PR - 1), // BR
+                ];
+
+                for &(x, y) in &corners {
+                    let got = <M as PixelRemapper>::remap_xy(x, y);
+                    let exp = expected_ctrdd_xy::<PR, PC, TR, TC>(x, y);
+                    assert_eq!(
+                        got, exp,
+                        "corner mismatch at panel (row={}, col={}), virtual=({}, {})",
+                        r, c, x, y
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_chain_top_right_down_corners_3x2() {
+        const PR: usize = 32;
+        const PC: usize = 64;
+        const TR: usize = 3;
+        const TC: usize = 2;
+        type M = ChainTopRightDown<PR, PC, TR, TC>;
+
+        for r in 0..TR {
+            for c in 0..TC {
+                let x0 = c * PC;
+                let y0 = r * PR;
+                let corners = [
+                    (x0, y0),                   // TL
+                    (x0 + PC - 1, y0),          // TR
+                    (x0, y0 + PR - 1),          // BL
+                    (x0 + PC - 1, y0 + PR - 1), // BR
+                ];
+
+                for &(x, y) in &corners {
+                    let got = <M as PixelRemapper>::remap_xy(x, y);
+                    let exp = expected_ctrdd_xy::<PR, PC, TR, TC>(x, y);
+                    assert_eq!(
+                        got, exp,
+                        "corner mismatch at panel (row={}, col={}), virtual=({}, {})",
+                        r, c, x, y
+                    );
+                }
+            }
+        }
     }
 }
