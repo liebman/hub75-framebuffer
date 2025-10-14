@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+* bump `esp-hal` to `1.0.0-rc1`
+
 ## [0.4.2] - 2025-08-16
 
 ## [0.4.1] - 2025-08-14
