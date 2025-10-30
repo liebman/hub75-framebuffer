@@ -26,7 +26,7 @@ defmt = { version = "1.0.1", optional = true }
 embed-doc-image = { version = "0.1.4", optional = true }
 embedded-dma = "0.2.0"
 embedded-graphics = { version = "0.8.1" }
-esp-hal = { version = "=1.0.0-rc.1", default-features = false, features = ["requires-unstable"], optional = true }
+esp-hal = { version = "1.0.0", default-features = false, features = ["requires-unstable"], optional = true }
 
 [features]
 default = []
