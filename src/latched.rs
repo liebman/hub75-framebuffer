@@ -548,6 +548,7 @@ impl<
     /// let (_, tx_descriptors) = esp_hal::dma_descriptors!(0, FBType::dma_buffer_size_bytes());
     /// ```
     #[cfg(feature = "esp-hal-dma")]
+    #[must_use]
     pub const fn dma_buffer_size_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
