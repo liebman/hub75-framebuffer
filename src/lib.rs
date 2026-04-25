@@ -111,14 +111,11 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-#[cfg(not(feature = "esp-hal-dma"))]
-use embedded_dma::ReadBuffer;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::Point;
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
+pub mod bitplane;
 pub mod latched;
 pub mod plain;
 pub mod tiling;
@@ -166,26 +163,8 @@ pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
 }
 
-/// Trait for read-only framebuffers
-///
-/// This trait defines the basic functionality required for a framebuffer
-/// that can be read from and transferred via DMA.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait FrameBuffer<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->: ReadBuffer
-{
+/// Trait for read-only framebuffers.
+pub trait FrameBuffer {
     /// Returns the word size configuration for this framebuffer
     fn get_word_size(&self) -> WordSize;
 }
@@ -194,43 +173,13 @@ pub trait FrameBuffer<
 ///
 /// This trait extends `FrameBuffer` with the ability to draw to the framebuffer
 /// using the `embedded_graphics` drawing primitives.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait MutableFrameBuffer<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->:
-    FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    + DrawTarget<Color = Color, Error = core::convert::Infallible>
+pub trait MutableFrameBuffer:
+    FrameBuffer + DrawTarget<Color = Color, Error = core::convert::Infallible>
 {
 }
 
 /// Trait for all operations a user may want to call on a framebuffer.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait FrameBufferOperations<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
+pub trait FrameBufferOperations: FrameBuffer {
     /// Erase pixel colors while preserving control bits.
     /// This is much faster than `format()` and is the typical way to clear the display.
     fn erase(&mut self);

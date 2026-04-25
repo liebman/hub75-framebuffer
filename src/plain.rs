@@ -131,7 +131,7 @@
 
 use core::convert::Infallible;
 
-use crate::FrameBufferOperations;
+use crate::{FrameBufferOperations, MutableFrameBuffer};
 use bitfield::bitfield;
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
@@ -605,8 +605,7 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[inline]
     fn erase(&mut self) {
@@ -762,8 +761,7 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> WordSize {
         WordSize::Sixteen
@@ -776,12 +774,21 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> WordSize {
         WordSize::Sixteen
     }
+}
+
+impl<
+        const ROWS: usize,
+        const COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+    > MutableFrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+{
 }
 
 #[cfg(test)]
@@ -1784,13 +1791,7 @@ mod tests {
         fb.set_pixel_internal(20, 10, Color::GREEN);
 
         // Explicitly call trait method to hit the FrameBufferOperations impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::erase(&mut fb);
+        <TestFrameBuffer as FrameBufferOperations>::erase(&mut fb);
 
         // Verify colors cleared on frame 0
         let mc10 = get_mapped_index(10);
@@ -1808,13 +1809,11 @@ mod tests {
         let mut fb = TestFrameBuffer::new();
 
         // Explicitly call trait method to hit the FrameBufferOperations impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::set_pixel(&mut fb, Point::new(8, 3), Color::BLUE);
+        <TestFrameBuffer as FrameBufferOperations>::set_pixel(
+            &mut fb,
+            Point::new(8, 3),
+            Color::BLUE,
+        );
 
         let idx = get_mapped_index(8);
         assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);

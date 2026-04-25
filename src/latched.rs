@@ -172,7 +172,7 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 use core::convert::Infallible;
 
 use super::Color;
-use crate::FrameBufferOperations;
+use crate::{FrameBufferOperations, MutableFrameBuffer};
 use bitfield::bitfield;
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
@@ -663,8 +663,7 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[inline]
     fn erase(&mut self) {
@@ -806,8 +805,7 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > super::FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > super::FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> super::WordSize {
         super::WordSize::Eight
@@ -834,12 +832,21 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > super::FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > super::FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> super::WordSize {
         super::WordSize::Eight
     }
+}
+
+impl<
+        const ROWS: usize,
+        const COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+    > MutableFrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+{
 }
 
 #[cfg(test)]
@@ -1904,13 +1911,7 @@ mod tests {
         fb.set_pixel_internal(20, 10, Color::GREEN);
 
         // Call the trait method explicitly to exercise the impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::erase(&mut fb);
+        <TestFrameBuffer as FrameBufferOperations>::erase(&mut fb);
 
         // Verify colors are cleared but control bits/timing remain intact on frame 0
         let mc10 = map_index(10);
@@ -1939,13 +1940,11 @@ mod tests {
         let mut fb = TestFrameBuffer::new();
 
         // Call the trait method explicitly to exercise the impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::set_pixel(&mut fb, Point::new(8, 3), Color::BLUE);
+        <TestFrameBuffer as FrameBufferOperations>::set_pixel(
+            &mut fb,
+            Point::new(8, 3),
+            Color::BLUE,
+        );
 
         // For BITS=3, BLUE should light blue channel in early frames
         let idx = map_index(8);

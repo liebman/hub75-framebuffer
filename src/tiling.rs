@@ -8,7 +8,7 @@
 
 use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{Color, FrameBuffer, FrameBufferOperations, WordSize};
+use crate::{Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, WordSize};
 #[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
@@ -345,8 +345,7 @@ impl<
 }
 
 impl<
-        F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
-            + FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBufferOperations + FrameBuffer,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -356,7 +355,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations
     for TiledFrameBuffer<
         F,
         M,
@@ -447,7 +446,7 @@ unsafe impl<
 }
 
 impl<
-        F: FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBuffer,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -457,7 +456,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer
     for TiledFrameBuffer<
         F,
         M,
@@ -476,6 +475,33 @@ impl<
     }
 }
 
+impl<
+        F: MutableFrameBuffer,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > MutableFrameBuffer
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -483,6 +509,7 @@ mod tests {
     use embedded_graphics::prelude::*;
 
     use super::*;
+    use crate::MutableFrameBuffer;
     use core::convert::Infallible;
 
     #[test]
@@ -704,27 +731,13 @@ mod tests {
         }
     }
 
-    impl<
-            const ROWS: usize,
-            const COLS: usize,
-            const NROWS: usize,
-            const BITS: u8,
-            const FRAME_COUNT: usize,
-        > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
-    {
+    impl FrameBuffer for TestFrameBuffer {
         fn get_word_size(&self) -> WordSize {
             self.word_size
         }
     }
 
-    impl<
-            const ROWS: usize,
-            const COLS: usize,
-            const NROWS: usize,
-            const BITS: u8,
-            const FRAME_COUNT: usize,
-        > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
-    {
+    impl FrameBufferOperations for TestFrameBuffer {
         fn erase(&mut self) {
             self.calls.borrow_mut().push(Call::Erase);
         }
@@ -733,6 +746,8 @@ mod tests {
             self.calls.borrow_mut().push(Call::SetPixel { p, color });
         }
     }
+
+    impl MutableFrameBuffer for TestFrameBuffer {}
 
     #[cfg(not(feature = "esp-hal-dma"))]
     unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
