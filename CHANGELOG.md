@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+* add new bitplane framebuffer
+* remove dependency on `esp-hal`
+
 ## [0.7.0] - 2026-04-25
 
 * bump `esp-hal` to `1.1.0`

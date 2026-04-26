@@ -9,11 +9,8 @@
 use core::{convert::Infallible, marker::PhantomData};
 
 use crate::{Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, WordSize};
-#[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
 /// Computes the number of columns needed if the displays are bing tiled together.
 /// # Arguments
@@ -380,7 +377,6 @@ impl<
     }
 }
 
-#[cfg(not(feature = "esp-hal-dma"))]
 unsafe impl<
         T,
         F: ReadBuffer<Word = T>,
@@ -414,37 +410,6 @@ unsafe impl<
     }
 }
 
-#[cfg(feature = "esp-hal-dma")]
-unsafe impl<
-        F: ReadBuffer,
-        M: PixelRemapper,
-        const PANEL_ROWS: usize,
-        const PANEL_COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-        const TILE_ROWS: usize,
-        const TILE_COLS: usize,
-        const FB_COLS: usize,
-    > ReadBuffer
-    for TiledFrameBuffer<
-        F,
-        M,
-        PANEL_ROWS,
-        PANEL_COLS,
-        NROWS,
-        BITS,
-        FRAME_COUNT,
-        TILE_ROWS,
-        TILE_COLS,
-        FB_COLS,
-    >
-{
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        self.0.read_buffer()
-    }
-}
-
 impl<
         F: FrameBuffer,
         M: PixelRemapper,
@@ -472,6 +437,14 @@ impl<
 {
     fn get_word_size(&self) -> WordSize {
         self.0.get_word_size()
+    }
+
+    fn plane_count(&self) -> usize {
+        self.0.plane_count()
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        self.0.plane_ptr_len(plane_idx)
     }
 }
 
@@ -735,6 +708,14 @@ mod tests {
         fn get_word_size(&self) -> WordSize {
             self.word_size
         }
+
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn plane_ptr_len(&self, _plane_idx: usize) -> (*const u8, usize) {
+            (self.buf.as_ptr(), self.buf.len())
+        }
     }
 
     impl FrameBufferOperations for TestFrameBuffer {
@@ -749,17 +730,9 @@ mod tests {
 
     impl MutableFrameBuffer for TestFrameBuffer {}
 
-    #[cfg(not(feature = "esp-hal-dma"))]
     unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
         type Word = u8;
 
-        unsafe fn read_buffer(&self) -> (*const u8, usize) {
-            (self.buf.as_ptr(), self.buf.len())
-        }
-    }
-
-    #[cfg(feature = "esp-hal-dma")]
-    unsafe impl esp_hal::dma::ReadBuffer for TestFrameBuffer {
         unsafe fn read_buffer(&self) -> (*const u8, usize) {
             (self.buf.as_ptr(), self.buf.len())
         }

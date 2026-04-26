@@ -174,13 +174,10 @@ use core::convert::Infallible;
 use super::Color;
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 use bitfield::bitfield;
-#[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
 bitfield! {
     /// 8-bit word carrying the row-address and timing control signals that are
@@ -532,24 +529,15 @@ impl<
         fb
     }
 
-    /// This returns the size of the DMA buffer in bytes.  Its used to calculate
-    /// the number of DMA descriptors needed for `esp-hal`.
-    /// # Example
-    /// ```rust,no_run
-    /// use hub75_framebuffer::{latched::DmaFrameBuffer,compute_rows,compute_frame_count};
-    ///
-    /// const ROWS: usize = 32;
-    /// const COLS: usize = 64;
-    /// const BITS: u8 = 3; // Color depth (8 brightness levels, 7 frames)
-    /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
-    /// const FRAME_COUNT: usize = compute_frame_count(BITS); // Number of frames for BCM
-    ///
-    /// type FBType = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
-    /// let (_, tx_descriptors) = esp_hal::dma_descriptors!(0, FBType::dma_buffer_size_bytes());
-    /// ```
-    #[cfg(feature = "esp-hal-dma")]
+    /// Returns the number of planes in this framebuffer (always 1).
     #[must_use]
-    pub const fn dma_buffer_size_bytes() -> usize {
+    pub const fn plane_count() -> usize {
+        1
+    }
+
+    /// Returns the byte size of the single contiguous plane.
+    #[must_use]
+    pub const fn plane_size_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
@@ -722,7 +710,6 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -740,7 +727,6 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -810,6 +796,17 @@ impl<
     fn get_word_size(&self) -> super::WordSize {
         super::WordSize::Eight
     }
+
+    fn plane_count(&self) -> usize {
+        1
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        assert!(plane_idx == 0, "latched DmaFrameBuffer has only 1 plane");
+        let ptr = (&raw const self.frames).cast::<u8>();
+        let len = core::mem::size_of_val(&self.frames);
+        (ptr, len)
+    }
 }
 
 impl<
@@ -836,6 +833,17 @@ impl<
 {
     fn get_word_size(&self) -> super::WordSize {
         super::WordSize::Eight
+    }
+
+    fn plane_count(&self) -> usize {
+        1
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        assert!(plane_idx == 0, "latched DmaFrameBuffer has only 1 plane");
+        let ptr = (&raw const self.frames).cast::<u8>();
+        let len = core::mem::size_of_val(&self.frames);
+        (ptr, len)
     }
 }
 
@@ -1148,11 +1156,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "esp-hal-dma")]
-    fn test_dma_framebuffer_dma_buffer_size() {
+    fn test_plane_size_bytes() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
-        assert_eq!(TestFrameBuffer::dma_buffer_size_bytes(), expected_size);
+        assert_eq!(TestFrameBuffer::plane_size_bytes(), expected_size);
+        assert_eq!(TestFrameBuffer::plane_count(), 1);
     }
 
     #[test]

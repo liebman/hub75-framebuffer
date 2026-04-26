@@ -35,24 +35,6 @@ jobs:
       - name: Run tests
         run: cargo test --verbose --no-default-features --features "${{ matrix.features }}"
 
-  # Cross-compile check for esp-hal-dma feature (can't run tests on embedded target)
-  check-esp-hal-dma:
-    name: Check esp-hal-dma
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: riscv32imac-unknown-none-elf
-      
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Check esp-hal-dma
-        run: cargo check --lib --no-default-features --target riscv32imac-unknown-none-elf --features "esp-hal-dma,esp-hal/esp32c6,esp-hal/unstable"
-
   # Additional checks
   clippy:
     name: Clippy

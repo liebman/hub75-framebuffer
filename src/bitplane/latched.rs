@@ -5,17 +5,10 @@
 //! BCM timing is achieved by reusing DMA descriptors in a weighted chain.
 
 use core::convert::Infallible;
-#[cfg(feature = "esp-hal-dma")]
-use core::ptr::null_mut;
 
 use bitfield::bitfield;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::{
-    BurstConfig, DmaBufError, DmaDescriptor, DmaTxBuffer, EmptyBuf, Owner, Preparation,
-    TransferDirection,
-};
 
 use crate::Color;
 use crate::FrameBuffer;
@@ -186,17 +179,16 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         instance
     }
 
-    #[cfg(feature = "esp-hal-dma")]
-    /// Returns the number of DMA descriptors required by [`BcmDmaTxBuf`].
-    ///
-    /// The descriptor chain repeats each BCM plane with binary weighting
-    /// (`2^(PLANES-1-plane_idx)`).
+    /// Returns the number of BCM bit-planes.
     #[must_use]
-    pub const fn bcm_descriptor_count() -> usize {
-        let plane_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
-        let descs_per_plane = plane_bytes.div_ceil(4095);
-        let total_reps = (1usize << PLANES) - 1;
-        descs_per_plane * total_reps
+    pub const fn plane_count() -> usize {
+        PLANES
+    }
+
+    /// Returns the byte size of a single bit-plane.
+    #[must_use]
+    pub const fn plane_size_bytes() -> usize {
+        NROWS * core::mem::size_of::<Row<COLS>>()
     }
 
     /// Formats the frame buffer with row addresses and control bits.
@@ -300,6 +292,20 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
     fn get_word_size(&self) -> WordSize {
         WordSize::Eight
     }
+
+    fn plane_count(&self) -> usize {
+        PLANES
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        assert!(
+            plane_idx < PLANES,
+            "plane_idx {plane_idx} out of range for {PLANES} planes"
+        );
+        let ptr = self.planes[plane_idx].as_ptr().cast::<u8>();
+        let len = NROWS * core::mem::size_of::<Row<COLS>>();
+        (ptr, len)
+    }
 }
 
 impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBufferOperations
@@ -343,126 +349,6 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "esp-hal-dma")]
-/// DMA TX buffer wrapper that emits BCM-weighted descriptor chains.
-///
-/// This allows a single [`DmaFrameBuffer`] to be replayed with per-plane timing
-/// weights by reusing descriptors instead of duplicating framebuffer data.
-pub struct BcmDmaTxBuf<const NROWS: usize, const COLS: usize, const PLANES: usize> {
-    fb: &'static mut DmaFrameBuffer<NROWS, COLS, PLANES>,
-    descriptors: &'static mut [DmaDescriptor],
-}
-
-#[cfg(feature = "esp-hal-dma")]
-impl<const NROWS: usize, const COLS: usize, const PLANES: usize> BcmDmaTxBuf<NROWS, COLS, PLANES> {
-    /// Creates a BCM DMA transmit buffer from framebuffer and descriptor storage.
-    ///
-    /// Returns [`DmaBufError::InsufficientDescriptors`] when `descriptors` has
-    /// fewer entries than [`DmaFrameBuffer::bcm_descriptor_count`].
-    pub fn new(
-        fb: &'static mut DmaFrameBuffer<NROWS, COLS, PLANES>,
-        descriptors: &'static mut [DmaDescriptor],
-    ) -> Result<Self, DmaBufError> {
-        if descriptors.len() < DmaFrameBuffer::<NROWS, COLS, PLANES>::bcm_descriptor_count() {
-            return Err(DmaBufError::InsufficientDescriptors);
-        }
-
-        Ok(Self { fb, descriptors })
-    }
-
-    /// Splits this wrapper back into framebuffer and descriptor storage.
-    ///
-    /// Useful when transfer APIs return ownership of the final buffer and you
-    /// need to reuse both allocations for the next frame.
-    pub fn split(
-        self,
-    ) -> (
-        &'static mut DmaFrameBuffer<NROWS, COLS, PLANES>,
-        &'static mut [DmaDescriptor],
-    ) {
-        (self.fb, self.descriptors)
-    }
-}
-
-#[cfg(feature = "esp-hal-dma")]
-unsafe impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DmaTxBuffer
-    for BcmDmaTxBuf<NROWS, COLS, PLANES>
-{
-    type View = Self;
-    type Final = Self;
-
-    fn prepare(&mut self) -> Preparation {
-        let plane_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
-        let mut desc_idx = 0;
-        let expected_desc = DmaFrameBuffer::<NROWS, COLS, PLANES>::bcm_descriptor_count();
-
-        debug_assert_eq!(
-            self.descriptors.len(),
-            expected_desc,
-            "descriptor pool length mismatch"
-        );
-
-        for plane_idx in 0..PLANES {
-            let reps = 1usize << (PLANES - 1 - plane_idx);
-            let plane_ptr = self.fb.planes[plane_idx].as_mut_ptr().cast::<u8>();
-
-            for _ in 0..reps {
-                let mut remaining = plane_bytes;
-                let mut offset = 0;
-                while remaining > 0 {
-                    let chunk = remaining.min(4095);
-                    debug_assert!(
-                        desc_idx < self.descriptors.len(),
-                        "descriptor index overflow"
-                    );
-                    let desc = &mut self.descriptors[desc_idx];
-                    desc.buffer = unsafe { plane_ptr.add(offset) };
-                    desc.set_size(chunk);
-                    desc.set_length(chunk);
-                    desc.set_owner(Owner::Dma);
-                    desc.set_suc_eof(false);
-                    desc.next = null_mut();
-                    remaining -= chunk;
-                    offset += chunk;
-                    desc_idx += 1;
-                }
-            }
-        }
-
-        for i in 0..desc_idx {
-            let is_last = i + 1 == desc_idx;
-            let next = if is_last {
-                null_mut()
-            } else {
-                unsafe { self.descriptors.as_mut_ptr().add(i + 1) }
-            };
-            let desc = &mut self.descriptors[i];
-            desc.set_owner(Owner::Dma);
-            desc.set_suc_eof(is_last);
-            desc.next = next;
-        }
-
-        debug_assert_eq!(desc_idx, expected_desc, "descriptor count mismatch");
-
-        let mut seed = EmptyBuf;
-        let mut prep: Preparation = seed.prepare();
-        prep.start = self.descriptors.as_mut_ptr();
-        prep.direction = TransferDirection::Out;
-        prep.burst_transfer = BurstConfig::default();
-        prep.check_owner = Some(false);
-        prep.auto_write_back = false;
-        prep
-    }
-
-    fn into_view(self) -> Self::View {
-        self
-    }
-
-    fn from_view(view: Self::View) -> Self::Final {
-        view
     }
 }
 
@@ -586,9 +472,12 @@ mod tests {
         assert_eq!(fb.planes, before);
     }
 
-    #[cfg(feature = "esp-hal-dma")]
     #[test]
-    fn bcm_descriptor_count_matches_expected_for_common_panel() {
-        assert_eq!(TestBuffer::bcm_descriptor_count(), 255);
+    fn plane_info_for_common_panel() {
+        assert_eq!(TestBuffer::plane_count(), 8);
+        assert_eq!(
+            TestBuffer::plane_size_bytes(),
+            16 * core::mem::size_of::<Row<64>>()
+        );
     }
 }

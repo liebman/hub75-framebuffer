@@ -74,17 +74,6 @@
 //! hub75-framebuffer = { version = "0.7.0", features = ["skip-black-pixels"] }
 //! ```
 //!
-//! ### `esp-hal-dma` Feature (required when using `esp-hal`)
-//! **Required** when using the `esp-hal` crate for ESP32 development. This feature
-//! switches the `ReadBuffer` trait implementation from `embedded-dma` to `esp-hal::dma`.
-//! If you're targeting ESP32 devices with `esp-hal`, you **must** enable this feature
-//! for DMA compatibility.
-//!
-//! ```toml
-//! [dependencies]
-//! hub75-framebuffer = { version = "0.7.0", features = ["esp-hal-dma"] }
-//! ```
-//!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
 //! **Required** when targeting the original ESP32 chip (not ESP32-S3 or other variants).
 //! This feature adjusts byte ordering to accommodate the quirky requirements of the
@@ -167,6 +156,24 @@ pub const fn compute_frame_count(bits: u8) -> usize {
 pub trait FrameBuffer {
     /// Returns the word size configuration for this framebuffer
     fn get_word_size(&self) -> WordSize;
+
+    /// Returns the number of BCM bit-planes in this framebuffer.
+    ///
+    /// Contiguous (threshold-based) framebuffers return `1` — the entire
+    /// buffer is treated as a single plane.  True bit-plane framebuffers
+    /// return the number of planes (typically equal to the colour depth in
+    /// bits).
+    fn plane_count(&self) -> usize;
+
+    /// Returns a raw pointer and byte length for the given plane.
+    ///
+    /// For a single-plane framebuffer (`plane_count() == 1`), `plane_idx`
+    /// must be `0` and the returned span covers the whole DMA-ready buffer.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `plane_idx >= plane_count()`.
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize);
 }
 
 /// Trait for mutable framebuffers
