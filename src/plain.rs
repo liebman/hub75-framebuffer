@@ -464,15 +464,17 @@ impl<
         instance
     }
 
-    /// Returns the number of planes in this framebuffer (always 1).
+    /// Returns the number of BCM chunks in this framebuffer (always 1 for
+    /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
-    pub const fn plane_count() -> usize {
+    pub const fn bcm_chunk_count() -> usize {
         1
     }
 
-    /// Returns the byte size of the single contiguous plane.
+    /// Returns the byte size of one BCM chunk (for single-plane framebuffers
+    /// this equals the total DMA buffer size, since BCM weighting is baked in).
     #[must_use]
-    pub const fn plane_size_bytes() -> usize {
+    pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
@@ -1138,11 +1140,11 @@ mod tests {
     }
 
     #[test]
-    fn test_plane_size_bytes() {
+    fn test_bcm_chunk_info() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
-        assert_eq!(TestFrameBuffer::plane_size_bytes(), expected_size);
-        assert_eq!(TestFrameBuffer::plane_count(), 1);
+        assert_eq!(TestFrameBuffer::bcm_chunk_bytes(), expected_size);
+        assert_eq!(TestFrameBuffer::bcm_chunk_count(), 1);
     }
 
     #[test]
