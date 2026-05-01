@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
-* add new bitplane framebuffer
+### ⚠️ Breaking
+
+* removed unneeded const generics from the FrameBuffer, MutableFrameBuffer, and FrameBufferOperations traits
+
+### Added
+
+* add new bitplane framebuffers
+
+### Removed
+
 * remove dependency on `esp-hal`
 
 ## [0.7.0] - 2026-04-25
