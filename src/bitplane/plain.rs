@@ -408,6 +408,7 @@ mod tests {
 
     use super::*;
     use embedded_graphics::prelude::*;
+    use std::format;
 
     type TestBuffer = DmaFrameBuffer<16, 64, 8>;
 
@@ -532,5 +533,101 @@ mod tests {
             TestBuffer::bcm_chunk_bytes(),
             16 * core::mem::size_of::<Row<64>>()
         );
+    }
+
+    #[test]
+    fn frame_buffer_trait_accessors_report_expected_values() {
+        let fb = TestBuffer::new();
+        let as_trait: &dyn FrameBuffer = &fb;
+        assert_eq!(as_trait.get_word_size(), WordSize::Sixteen);
+        assert_eq!(as_trait.plane_count(), 8);
+
+        let (ptr, len) = as_trait.plane_ptr_len(0);
+        assert_eq!(len, 16 * core::mem::size_of::<Row<64>>());
+        assert_eq!(ptr, fb.planes[0].as_ptr().cast::<u8>());
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn plane_ptr_len_panics_for_invalid_plane() {
+        let fb = TestBuffer::new();
+        let _ = fb.plane_ptr_len(8);
+    }
+
+    #[test]
+    fn origin_dimensions_match_panel_geometry() {
+        let fb = TestBuffer::new();
+        assert_eq!(fb.size(), Size::new(64, 32));
+    }
+
+    #[test]
+    fn debug_impl_includes_shape_information() {
+        let fb = TestBuffer::new();
+        let s = format!("{fb:?}");
+        assert!(s.contains("DmaFrameBuffer"));
+        assert!(s.contains("plane_count"));
+        assert!(s.contains("plane_size"));
+    }
+
+    #[test]
+    fn row_format_sets_expected_blank_and_latch_positions() {
+        let mut row = Row::<8>::new();
+        row.format(5, 4);
+
+        // i == 1 keeps OE high (visible) with previous address
+        let idx_1 = map_index(1);
+        assert!(row.data[idx_1].output_enable());
+        assert_eq!(row.data[idx_1].addr(), 4);
+
+        // i == COLS - BLANKING_DELAY - 1 blanks output before latch
+        let idx_blank = map_index(8 - BLANKING_DELAY - 1);
+        assert!(!row.data[idx_blank].output_enable());
+
+        // i == COLS - 1 latches and switches to new address
+        let idx_last = map_index(7);
+        assert!(row.data[idx_last].latch());
+        assert_eq!(row.data[idx_last].addr(), 5);
+    }
+
+    #[test]
+    fn default_constructors_match_new() {
+        let row_default = Row::<8>::default();
+        let row_new = Row::<8>::new();
+        assert_eq!(row_default, row_new);
+
+        let fb_default = TestBuffer::default();
+        let fb_new = TestBuffer::new();
+        assert_eq!(fb_default.planes, fb_new.planes);
+    }
+
+    #[test]
+    fn framebuffer_operations_trait_delegates_correctly() {
+        let mut fb = TestBuffer::new();
+        FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
+
+        assert!(fb.planes[0][5].data[map_index(3)].grn1());
+
+        FrameBufferOperations::erase(&mut fb);
+        for plane in &fb.planes {
+            for row in plane {
+                for entry in &row.data {
+                    assert!(!entry.red1());
+                    assert!(!entry.grn1());
+                    assert!(!entry.blu1());
+                    assert!(!entry.red2());
+                    assert!(!entry.grn2());
+                    assert!(!entry.blu2());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn entry_debug_shows_hex_value() {
+        let mut entry = Entry::new();
+        entry.set_red1(true);
+        let s = format!("{entry:?}");
+        assert!(s.contains("Entry"));
+        assert!(s.contains("0x"));
     }
 }
