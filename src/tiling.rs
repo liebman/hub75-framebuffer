@@ -8,12 +8,9 @@
 
 use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{Color, FrameBuffer, FrameBufferOperations, WordSize};
-#[cfg(not(feature = "esp-hal-dma"))]
+use crate::{Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, WordSize};
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
 /// Computes the number of columns needed if the displays are bing tiled together.
 /// # Arguments
@@ -345,8 +342,7 @@ impl<
 }
 
 impl<
-        F: FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
-            + FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBufferOperations + FrameBuffer,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -356,7 +352,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBufferOperations<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations
     for TiledFrameBuffer<
         F,
         M,
@@ -381,7 +377,6 @@ impl<
     }
 }
 
-#[cfg(not(feature = "esp-hal-dma"))]
 unsafe impl<
         T,
         F: ReadBuffer<Word = T>,
@@ -415,39 +410,8 @@ unsafe impl<
     }
 }
 
-#[cfg(feature = "esp-hal-dma")]
-unsafe impl<
-        F: ReadBuffer,
-        M: PixelRemapper,
-        const PANEL_ROWS: usize,
-        const PANEL_COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-        const TILE_ROWS: usize,
-        const TILE_COLS: usize,
-        const FB_COLS: usize,
-    > ReadBuffer
-    for TiledFrameBuffer<
-        F,
-        M,
-        PANEL_ROWS,
-        PANEL_COLS,
-        NROWS,
-        BITS,
-        FRAME_COUNT,
-        TILE_ROWS,
-        TILE_COLS,
-        FB_COLS,
-    >
-{
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        self.0.read_buffer()
-    }
-}
-
 impl<
-        F: FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>,
+        F: FrameBuffer,
         M: PixelRemapper,
         const PANEL_ROWS: usize,
         const PANEL_COLS: usize,
@@ -457,7 +421,7 @@ impl<
         const TILE_ROWS: usize,
         const TILE_COLS: usize,
         const FB_COLS: usize,
-    > FrameBuffer<PANEL_ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer
     for TiledFrameBuffer<
         F,
         M,
@@ -474,6 +438,41 @@ impl<
     fn get_word_size(&self) -> WordSize {
         self.0.get_word_size()
     }
+
+    fn plane_count(&self) -> usize {
+        self.0.plane_count()
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        self.0.plane_ptr_len(plane_idx)
+    }
+}
+
+impl<
+        F: MutableFrameBuffer,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > MutableFrameBuffer
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
 }
 
 #[cfg(test)]
@@ -483,6 +482,7 @@ mod tests {
     use embedded_graphics::prelude::*;
 
     use super::*;
+    use crate::MutableFrameBuffer;
     use core::convert::Infallible;
 
     #[test]
@@ -704,27 +704,21 @@ mod tests {
         }
     }
 
-    impl<
-            const ROWS: usize,
-            const COLS: usize,
-            const NROWS: usize,
-            const BITS: u8,
-            const FRAME_COUNT: usize,
-        > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
-    {
+    impl FrameBuffer for TestFrameBuffer {
         fn get_word_size(&self) -> WordSize {
             self.word_size
         }
+
+        fn plane_count(&self) -> usize {
+            1
+        }
+
+        fn plane_ptr_len(&self, _plane_idx: usize) -> (*const u8, usize) {
+            (self.buf.as_ptr(), self.buf.len())
+        }
     }
 
-    impl<
-            const ROWS: usize,
-            const COLS: usize,
-            const NROWS: usize,
-            const BITS: u8,
-            const FRAME_COUNT: usize,
-        > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT> for TestFrameBuffer
-    {
+    impl FrameBufferOperations for TestFrameBuffer {
         fn erase(&mut self) {
             self.calls.borrow_mut().push(Call::Erase);
         }
@@ -734,17 +728,11 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "esp-hal-dma"))]
+    impl MutableFrameBuffer for TestFrameBuffer {}
+
     unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
         type Word = u8;
 
-        unsafe fn read_buffer(&self) -> (*const u8, usize) {
-            (self.buf.as_ptr(), self.buf.len())
-        }
-    }
-
-    #[cfg(feature = "esp-hal-dma")]
-    unsafe impl esp_hal::dma::ReadBuffer for TestFrameBuffer {
         unsafe fn read_buffer(&self) -> (*const u8, usize) {
             (self.buf.as_ptr(), self.buf.len())
         }

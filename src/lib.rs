@@ -34,28 +34,50 @@
 //!
 //! ## Framebuffer Implementations
 //!
-//! This module provides two different framebuffer implementations optimized for
-//! HUB75 LED matrix displays:
+//! Four framebuffer layouts are provided, covering two hardware variants and
+//! two BCM strategies:
 //!
-//! 1. **Plain Implementation** (`plain` module)
-//!    - No additional hardware requirements
-//!    - Simpler implementation suitable for basic displays
+//! | Module | Word size | External latch? | BCM strategy |
+//! |--------|-----------|-----------------|--------------|
+//! | [`plain`] | 16-bit | No | Threshold frames |
+//! | [`latched`] | 8-bit | Yes | Threshold frames |
+//! | [`bitplane::plain`] | 16-bit | No | True bitplane |
+//! | [`bitplane::latched`] | 8-bit | Yes | True bitplane |
 //!
-//! 2. **Latched Implementation** (`latched` module)
-//!    - Requires external latch hardware for address lines
+//! ### Plain vs. Latched
+//! - **Plain** packs all HUB75 signals (address, latch, OE, colour) into each
+//!   16-bit word. No extra hardware beyond a parallel output peripheral.
+//! - **Latched** uses 8-bit words with a separate external latch circuit to
+//!   hold the row address and gate the pixel clock, halving per-entry memory.
 //!
-//! Both implementations:
-//! - Have configurable row and column dimensions
-//! - Support different color depths through Binary Code Modulation (BCM)
-//! - Implement the `ReadBuffer` trait for DMA compatibility
+//! ### Threshold Frames vs. True Bitplane
+//! The two BCM strategies differ in how they store colour data and how the DMA
+//! chain must be configured to render it.
+//!
+//! **Threshold frames** (`plain`, `latched`) -- the driver compares each
+//! channel's 8-bit value against per-frame thresholds and stores the resulting
+//! on/off bits. For a colour depth of `BITS`, this produces
+//! `2^BITS - 1` frames. Frame *n* is displayed for a duration proportional to
+//! `2^n`. Memory grows exponentially with colour depth.
+//!
+//! **True bitplane** (`bitplane::plain`, `bitplane::latched`) -- each of
+//! `PLANES` planes (typically 8) stores one bit of every colour channel
+//! directly. To render, configure the DMA descriptor chain so that each
+//! plane's data is output `2^(7 - plane_index)` times (plane 0 = MSB is
+//! scanned 128 times, plane 7 = LSB is scanned once). Memory scales linearly
+//! with the number of planes.
+//!
+//! All four variants have configurable row and column dimensions, support
+//! `embedded-graphics` via the `DrawTarget` trait, and expose per-plane
+//! pointers for DMA setup through the [`FrameBuffer`] trait.
 //!
 //! ## Multiple Panels
 //! Use [`tiling::TiledFrameBuffer`] to drive several HUB75 panels as one large
 //! virtual display. Combine it with a pixel-remapping policy such as
-//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above
-//! (`plain` or `latched`). The wrapper exposes a single `embedded-graphics`
-//! canvas, so for example a 3 × 3 stack of 64 × 32 panels simply looks like a
-//! 192 × 96 screen while all coordinate translation happens transparently.
+//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above.
+//! The wrapper exposes a single `embedded-graphics` canvas, so for example a
+//! 3 × 3 stack of 64 × 32 panels simply looks like a 192 × 96 screen while
+//! all coordinate translation happens transparently.
 //!
 //! ## Available Feature Flags
 //!
@@ -72,17 +94,6 @@
 //! ```toml
 //! [dependencies]
 //! hub75-framebuffer = { version = "0.7.0", features = ["skip-black-pixels"] }
-//! ```
-//!
-//! ### `esp-hal-dma` Feature (required when using `esp-hal`)
-//! **Required** when using the `esp-hal` crate for ESP32 development. This feature
-//! switches the `ReadBuffer` trait implementation from `embedded-dma` to `esp-hal::dma`.
-//! If you're targeting ESP32 devices with `esp-hal`, you **must** enable this feature
-//! for DMA compatibility.
-//!
-//! ```toml
-//! [dependencies]
-//! hub75-framebuffer = { version = "0.7.0", features = ["esp-hal-dma"] }
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
@@ -111,14 +122,11 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-#[cfg(not(feature = "esp-hal-dma"))]
-use embedded_dma::ReadBuffer;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::Point;
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
+pub mod bitplane;
 pub mod latched;
 pub mod plain;
 pub mod tiling;
@@ -166,71 +174,41 @@ pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
 }
 
-/// Trait for read-only framebuffers
-///
-/// This trait defines the basic functionality required for a framebuffer
-/// that can be read from and transferred via DMA.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait FrameBuffer<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->: ReadBuffer
-{
+/// Trait for read-only framebuffers.
+pub trait FrameBuffer {
     /// Returns the word size configuration for this framebuffer
     fn get_word_size(&self) -> WordSize;
+
+    /// Returns the number of BCM bit-planes in this framebuffer.
+    ///
+    /// Contiguous (threshold-based) framebuffers return `1` — the entire
+    /// buffer is treated as a single plane.  True bit-plane framebuffers
+    /// return the number of planes (typically equal to the colour depth in
+    /// bits).
+    fn plane_count(&self) -> usize;
+
+    /// Returns a raw pointer and byte length for the given plane.
+    ///
+    /// For a single-plane framebuffer (`plane_count() == 1`), `plane_idx`
+    /// must be `0` and the returned span covers the whole DMA-ready buffer.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `plane_idx >= plane_count()`.
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize);
 }
 
 /// Trait for mutable framebuffers
 ///
 /// This trait extends `FrameBuffer` with the ability to draw to the framebuffer
 /// using the `embedded_graphics` drawing primitives.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait MutableFrameBuffer<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->:
-    FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    + DrawTarget<Color = Color, Error = core::convert::Infallible>
+pub trait MutableFrameBuffer:
+    FrameBuffer + DrawTarget<Color = Color, Error = core::convert::Infallible>
 {
 }
 
 /// Trait for all operations a user may want to call on a framebuffer.
-///
-/// # Type Parameters
-///
-/// * `ROWS` - Total number of rows in the display
-/// * `COLS` - Number of columns in the display
-/// * `NROWS` - Number of rows processed in parallel
-/// * `BITS` - Number of bits per color channel
-/// * `FRAME_COUNT` - Number of frames needed for BCM
-pub trait FrameBufferOperations<
-    const ROWS: usize,
-    const COLS: usize,
-    const NROWS: usize,
-    const BITS: u8,
-    const FRAME_COUNT: usize,
->: FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
+pub trait FrameBufferOperations: FrameBuffer {
     /// Erase pixel colors while preserving control bits.
     /// This is much faster than `format()` and is the typical way to clear the display.
     fn erase(&mut self);

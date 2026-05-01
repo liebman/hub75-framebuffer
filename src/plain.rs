@@ -131,14 +131,11 @@
 
 use core::convert::Infallible;
 
-use crate::FrameBufferOperations;
+use crate::{FrameBufferOperations, MutableFrameBuffer};
 use bitfield::bitfield;
-#[cfg(not(feature = "esp-hal-dma"))]
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
-#[cfg(feature = "esp-hal-dma")]
-use esp_hal::dma::ReadBuffer;
 
 use super::Color;
 use super::FrameBuffer;
@@ -467,24 +464,17 @@ impl<
         instance
     }
 
-    /// This returns the size of the DMA buffer in bytes.  Its used to calculate
-    /// the number of DMA descriptors needed.
-    /// # Example
-    /// ```rust
-    /// use hub75_framebuffer::{Color,plain::DmaFrameBuffer,compute_rows,compute_frame_count};
-    ///
-    /// const ROWS: usize = 32;
-    /// const COLS: usize = 64;
-    /// const BITS: u8 = 3; // Color depth (8 brightness levels, 7 frames)
-    /// const NROWS: usize = compute_rows(ROWS); // Number of rows per scan
-    /// const FRAME_COUNT: usize = compute_frame_count(BITS);
-    ///
-    /// type FBType = DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>;
-    /// let (_, tx_descriptors) = esp_hal::dma_descriptors!(0, FBType::dma_buffer_size_bytes());
-    /// ```
-    #[cfg(feature = "esp-hal-dma")]
+    /// Returns the number of BCM chunks in this framebuffer (always 1 for
+    /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
-    pub const fn dma_buffer_size_bytes() -> usize {
+    pub const fn bcm_chunk_count() -> usize {
+        1
+    }
+
+    /// Returns the byte size of one BCM chunk (for single-plane framebuffers
+    /// this equals the total DMA buffer size, since BCM weighting is baked in).
+    #[must_use]
+    pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
@@ -605,8 +595,7 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBufferOperations<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBufferOperations for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     #[inline]
     fn erase(&mut self) {
@@ -679,7 +668,6 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -697,7 +685,6 @@ unsafe impl<
         const FRAME_COUNT: usize,
     > ReadBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    #[cfg(not(feature = "esp-hal-dma"))]
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
@@ -762,11 +749,21 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> WordSize {
         WordSize::Sixteen
+    }
+
+    fn plane_count(&self) -> usize {
+        1
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
+        let ptr = (&raw const self.frames).cast::<u8>();
+        let len = core::mem::size_of_val(&self.frames);
+        (ptr, len)
     }
 }
 
@@ -776,12 +773,32 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > FrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
     fn get_word_size(&self) -> WordSize {
         WordSize::Sixteen
     }
+
+    fn plane_count(&self) -> usize {
+        1
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
+        let ptr = (&raw const self.frames).cast::<u8>();
+        let len = core::mem::size_of_val(&self.frames);
+        (ptr, len)
+    }
+}
+
+impl<
+        const ROWS: usize,
+        const COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+    > MutableFrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+{
 }
 
 #[cfg(test)]
@@ -1123,11 +1140,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "esp-hal-dma")]
-    fn test_dma_framebuffer_dma_buffer_size() {
+    fn test_bcm_chunk_info() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
-        assert_eq!(TestFrameBuffer::dma_buffer_size_bytes(), expected_size);
+        assert_eq!(TestFrameBuffer::bcm_chunk_bytes(), expected_size);
+        assert_eq!(TestFrameBuffer::bcm_chunk_count(), 1);
     }
 
     #[test]
@@ -1784,13 +1801,7 @@ mod tests {
         fb.set_pixel_internal(20, 10, Color::GREEN);
 
         // Explicitly call trait method to hit the FrameBufferOperations impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::erase(&mut fb);
+        <TestFrameBuffer as FrameBufferOperations>::erase(&mut fb);
 
         // Verify colors cleared on frame 0
         let mc10 = get_mapped_index(10);
@@ -1808,13 +1819,11 @@ mod tests {
         let mut fb = TestFrameBuffer::new();
 
         // Explicitly call trait method to hit the FrameBufferOperations impl
-        <TestFrameBuffer as FrameBufferOperations<
-            TEST_ROWS,
-            TEST_COLS,
-            TEST_NROWS,
-            TEST_BITS,
-            TEST_FRAME_COUNT,
-        >>::set_pixel(&mut fb, Point::new(8, 3), Color::BLUE);
+        <TestFrameBuffer as FrameBufferOperations>::set_pixel(
+            &mut fb,
+            Point::new(8, 3),
+            Color::BLUE,
+        );
 
         let idx = get_mapped_index(8);
         assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
