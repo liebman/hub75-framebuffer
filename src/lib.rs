@@ -34,28 +34,50 @@
 //!
 //! ## Framebuffer Implementations
 //!
-//! This module provides two different framebuffer implementations optimized for
-//! HUB75 LED matrix displays:
+//! Four framebuffer layouts are provided, covering two hardware variants and
+//! two BCM strategies:
 //!
-//! 1. **Plain Implementation** (`plain` module)
-//!    - No additional hardware requirements
-//!    - Simpler implementation suitable for basic displays
+//! | Module | Word size | External latch? | BCM strategy |
+//! |--------|-----------|-----------------|--------------|
+//! | [`plain`] | 16-bit | No | Threshold frames |
+//! | [`latched`] | 8-bit | Yes | Threshold frames |
+//! | [`bitplane::plain`] | 16-bit | No | True bitplane |
+//! | [`bitplane::latched`] | 8-bit | Yes | True bitplane |
 //!
-//! 2. **Latched Implementation** (`latched` module)
-//!    - Requires external latch hardware for address lines
+//! ### Plain vs. Latched
+//! - **Plain** packs all HUB75 signals (address, latch, OE, colour) into each
+//!   16-bit word. No extra hardware beyond a parallel output peripheral.
+//! - **Latched** uses 8-bit words with a separate external latch circuit to
+//!   hold the row address and gate the pixel clock, halving per-entry memory.
 //!
-//! Both implementations:
-//! - Have configurable row and column dimensions
-//! - Support different color depths through Binary Code Modulation (BCM)
-//! - Implement the `ReadBuffer` trait for DMA compatibility
+//! ### Threshold Frames vs. True Bitplane
+//! The two BCM strategies differ in how they store colour data and how the DMA
+//! chain must be configured to render it.
+//!
+//! **Threshold frames** (`plain`, `latched`) -- the driver compares each
+//! channel's 8-bit value against per-frame thresholds and stores the resulting
+//! on/off bits. For a colour depth of `BITS`, this produces
+//! `2^BITS - 1` frames. Frame *n* is displayed for a duration proportional to
+//! `2^n`. Memory grows exponentially with colour depth.
+//!
+//! **True bitplane** (`bitplane::plain`, `bitplane::latched`) -- each of
+//! `PLANES` planes (typically 8) stores one bit of every colour channel
+//! directly. To render, configure the DMA descriptor chain so that each
+//! plane's data is output `2^(7 - plane_index)` times (plane 0 = MSB is
+//! scanned 128 times, plane 7 = LSB is scanned once). Memory scales linearly
+//! with the number of planes.
+//!
+//! All four variants have configurable row and column dimensions, support
+//! `embedded-graphics` via the `DrawTarget` trait, and expose per-plane
+//! pointers for DMA setup through the [`FrameBuffer`] trait.
 //!
 //! ## Multiple Panels
 //! Use [`tiling::TiledFrameBuffer`] to drive several HUB75 panels as one large
 //! virtual display. Combine it with a pixel-remapping policy such as
-//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above
-//! (`plain` or `latched`). The wrapper exposes a single `embedded-graphics`
-//! canvas, so for example a 3 × 3 stack of 64 × 32 panels simply looks like a
-//! 192 × 96 screen while all coordinate translation happens transparently.
+//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above.
+//! The wrapper exposes a single `embedded-graphics` canvas, so for example a
+//! 3 × 3 stack of 64 × 32 panels simply looks like a 192 × 96 screen while
+//! all coordinate translation happens transparently.
 //!
 //! ## Available Feature Flags
 //!

@@ -1,8 +1,71 @@
-//! Framebuffer format for an 8-bit latched HUB75 interface.
+//! Bitplane framebuffer for an 8-bit latched HUB75 interface.
 //!
-//! This variant is intended for a direct GPIO stream (no bit scrambler). Row
-//! addressing is carried by four `Address` bytes at the end of each row, and
-//! BCM timing is achieved by reusing DMA descriptors in a weighted chain.
+//! This module provides a framebuffer that stores colour data as separate
+//! bit-planes rather than the threshold-based frames used by
+//! [`crate::latched::DmaFrameBuffer`]. Each plane holds one bit of every
+//! colour channel, giving `PLANES` planes total (typically 8 for full 8-bit
+//! colour). Row addressing is carried by four trailing `Address` bytes per
+//! row, identical to the non-bitplane latched layout.
+//!
+//! # Hardware Requirements
+//! Requires a parallel output peripheral capable of clocking 8 bits at a time,
+//! plus an external latch circuit to hold the row address and gate the pixel
+//! clock (same circuit as the non-bitplane latched variant).
+//!
+//! # HUB75 Signal Bit Mapping (8-bit words)
+//! Two distinct 8-bit words are streamed to the panel:
+//!
+//! 1. **Address / Timing (`Address`)** -- row-select and latch control.
+//! 2. **Pixel Data (`Entry`)** -- RGB bits for two sub-pixels plus OE/LAT
+//!    shadow bits.
+//!
+//! ```text
+//! Address word (row select & timing)
+//! ┌──7─┬──6──┬─5─-┬─4─-┬─3-─┬─2-─┬─1-─┬─0-─┐
+//! │ OE │ LAT │    │ E  │ D  │ C  │ B  │ A  │
+//! └────┴─────┴───-┴───-┴───-┴───-┴───-┴───-┘
+//! ```
+//! ```text
+//! Entry word (pixel data)
+//! ┌──7─┬──6──┬─5──┬─4──┬─3──┬─2──┬─1──┬─0──┐
+//! │ OE │ LAT │ B2 │ G2 │ R2 │ B1 │ G1 │ R1 │
+//! └────┴─────┴────┴────┴────┴────┴────┴────┘
+//! ```
+//!
+//! Bits 7-6 (OE/LAT) occupy the same positions in both words so the control
+//! lines stay valid throughout the DMA stream.
+//!
+//! # Bitplane BCM Rendering
+//! The framebuffer is organised into `PLANES` bit-planes. Plane 0 carries the
+//! MSB (bit 7) of each colour channel, plane 1 carries bit 6, and so on down
+//! to plane 7 which carries the LSB (bit 0).
+//!
+//! To produce correct brightness via Binary Code Modulation, configure the DMA
+//! descriptor chain so that each plane's data is output (scanned) a number of
+//! times equal to its bit-weight:
+//!
+//! ```text
+//! plane 0 (bit 7) → output 2^7 = 128 times
+//! plane 1 (bit 6) → output 2^6 =  64 times
+//! plane 2 (bit 5) → output 2^5 =  32 times
+//!   …
+//! plane 7 (bit 0) → output 2^0 =   1 time
+//! ```
+//!
+//! That is, each plane is scanned `2^(7 - plane_index)` times. The weighted
+//! repetition counts sum to 255, reproducing the full 8-bit intensity range.
+//! See <https://www.batsocks.co.uk/readme/art_bcm_1.htm> for background on
+//! BCM.
+//!
+//! # Memory Usage
+//! Memory scales linearly with `PLANES`: the buffer contains `PLANES` copies
+//! of the row data (one per bit-plane). Unlike the threshold-based
+//! [`crate::latched::DmaFrameBuffer`] whose frame count grows as
+//! `2^BITS - 1`, this layout uses exactly `PLANES` planes regardless of
+//! colour depth.
+//!
+//! Each row is `COLS` data bytes plus 4 address bytes, so total size is
+//! `PLANES * NROWS * (COLS + 4)` bytes.
 
 use core::convert::Infallible;
 
