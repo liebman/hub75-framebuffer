@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+* bitplane/latched: tweak latch timing & clear values after latch closed to prevent address "bleeding" into the first pixels in some cases
+
 ## [0.8.0] - 2026-05-01
 
 ### ⚠️ Breaking

@@ -155,14 +155,10 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
     let mut tbl = [[Address::new(); 4]; 32];
     let mut addr = 0;
     while addr < 32 {
-        let mut i = 0;
-        while i < 4 {
-            let latch = i != 3;
-            let mapped_i = map_index(i);
-            let latch_bit = if latch { 1u8 << 6 } else { 0u8 };
-            tbl[addr][mapped_i].0 = latch_bit | addr as u8;
-            i += 1;
-        }
+        tbl[addr][map_index(0)].0 = 1u8 << 6 | addr as u8;
+        tbl[addr][map_index(1)].0 = 1u8 << 6 | addr as u8;
+        tbl[addr][map_index(2)].0 = addr as u8;
+        tbl[addr][map_index(3)].0 = 0;
         addr += 1;
     }
     tbl
@@ -429,11 +425,12 @@ mod tests {
     fn row_format_sets_address_and_control_bits() {
         let mut row = Row::<8>::new();
         row.format(5);
-        let latch_false_count = row.address.iter().filter(|addr| !addr.latch()).count();
-        assert_eq!(latch_false_count, 1);
-        for addr in &row.address {
-            assert_eq!(addr.addr(), 5);
-        }
+        let latch_count = row.address.iter().filter(|a| a.latch()).count();
+        assert_eq!(latch_count, 2);
+        assert_eq!(row.address[map_index(0)].addr(), 5);
+        assert_eq!(row.address[map_index(1)].addr(), 5);
+        assert_eq!(row.address[map_index(2)].addr(), 5);
+        assert_eq!(row.address[map_index(3)].0, 0);
         let oe_false_count = row
             .data
             .iter()
@@ -449,9 +446,11 @@ mod tests {
 
         for plane_idx in 0..8 {
             for row_idx in 0..16 {
-                for addr in &fb.planes[plane_idx][row_idx].address {
-                    assert_eq!(addr.addr(), row_idx as u8);
-                }
+                let row = &fb.planes[plane_idx][row_idx];
+                assert_eq!(row.address[map_index(0)].addr(), row_idx as u8);
+                assert_eq!(row.address[map_index(1)].addr(), row_idx as u8);
+                assert_eq!(row.address[map_index(2)].addr(), row_idx as u8);
+                assert_eq!(row.address[map_index(3)].0, 0);
             }
         }
     }
@@ -631,12 +630,18 @@ mod tests {
     fn addr_table_entries_are_consistent() {
         let table = make_addr_table();
         for addr in 0..32u8 {
-            let row_addrs = &table[addr as usize];
-            for a in row_addrs {
-                assert_eq!(a.addr(), addr);
-            }
-            let latch_false_count = row_addrs.iter().filter(|a| !a.latch()).count();
-            assert_eq!(latch_false_count, 1);
+            let row = &table[addr as usize];
+            // First two clocks: latch asserted with row address
+            assert!(row[map_index(0)].latch());
+            assert_eq!(row[map_index(0)].addr(), addr);
+            assert!(row[map_index(1)].latch());
+            assert_eq!(row[map_index(1)].addr(), addr);
+            // Third clock: latch released, address still driven
+            assert!(!row[map_index(2)].latch());
+            assert_eq!(row[map_index(2)].addr(), addr);
+            // Fourth clock: clear cycle, all zero
+            assert!(!row[map_index(3)].latch());
+            assert_eq!(row[map_index(3)].0, 0);
         }
         assert_eq!(table, ADDR_TABLE);
     }
