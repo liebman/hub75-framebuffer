@@ -139,7 +139,6 @@ use embedded_graphics::prelude::Point;
 
 use super::Color;
 use super::FrameBuffer;
-use super::WordSize;
 
 #[cfg(feature = "blank-delay-1")]
 const BLANKING_DELAY: usize = 1;
@@ -767,33 +766,7 @@ impl<
         const FRAME_COUNT: usize,
     > FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
-
-    fn plane_count(&self) -> usize {
-        1
-    }
-
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
-    }
-}
-
-impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
+    type Word = u16;
 
     fn plane_count(&self) -> usize {
         1

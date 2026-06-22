@@ -176,8 +176,17 @@ pub const fn compute_frame_count(bits: u8) -> usize {
 
 /// Trait for read-only framebuffers.
 pub trait FrameBuffer {
+    /// The word type used by this framebuffer.
+    type Word;
+
     /// Returns the word size configuration for this framebuffer
-    fn get_word_size(&self) -> WordSize;
+    fn get_word_size(&self) -> WordSize {
+        match size_of::<Self::Word>() {
+            1 => WordSize::Eight,
+            2 => WordSize::Sixteen,
+            _ => panic!("Unsupported word size"),
+        }
+    }
 
     /// Returns the number of BCM bit-planes in this framebuffer.
     ///
