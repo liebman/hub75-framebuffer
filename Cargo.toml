@@ -34,6 +34,12 @@ esp32-ordering = []
 defmt = ["dep:defmt"]
 doc-images = ["dep:embed-doc-image"]
 
+# these are for the plain framebuffer only
+blank-delay-1 = []
+blank-delay-2 = []
+blank-delay-4 = []
+blank-delay-8 = []
+
 [dev-dependencies]
 criterion = "0.6"
 

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * bitplane/latched: tweak latch timing & clear values after latch closed to prevent address "bleeding" into the first pixels in some cases
 
+### Added
+
+* plain, bitplane/plain: new `blank-delay-1`, `blank-delay-2`, `blank-delay-4`, and `blank-delay-8` features to control extra blanking time around row address changes, preventing ghosting artifacts on panels with slower address-line settling
+
 ## [0.8.0] - 2026-05-01
 
 ### ⚠️ Breaking

@@ -141,6 +141,22 @@ use super::Color;
 use super::FrameBuffer;
 use super::WordSize;
 
+#[cfg(feature = "blank-delay-1")]
+const BLANKING_DELAY: usize = 1;
+#[cfg(feature = "blank-delay-2")]
+const BLANKING_DELAY: usize = 2;
+#[cfg(feature = "blank-delay-4")]
+const BLANKING_DELAY: usize = 4;
+#[cfg(feature = "blank-delay-8")]
+const BLANKING_DELAY: usize = 8;
+
+// Default to 1 if no blanking delay feature is enabled
+#[cfg(not(any(
+    feature = "blank-delay-1",
+    feature = "blank-delay-2",
+    feature = "blank-delay-4",
+    feature = "blank-delay-8"
+)))]
 const BLANKING_DELAY: usize = 1;
 
 /// Creates a pre-computed data template for a row with the specified addresses.
