@@ -78,6 +78,22 @@ use crate::FrameBuffer;
 use crate::WordSize;
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
+#[cfg(feature = "blank-delay-1")]
+const BLANKING_DELAY: usize = 1;
+#[cfg(feature = "blank-delay-2")]
+const BLANKING_DELAY: usize = 2;
+#[cfg(feature = "blank-delay-4")]
+const BLANKING_DELAY: usize = 4;
+#[cfg(feature = "blank-delay-8")]
+const BLANKING_DELAY: usize = 8;
+
+// Default to 1 if no blanking delay feature is enabled
+#[cfg(not(any(
+    feature = "blank-delay-1",
+    feature = "blank-delay-2",
+    feature = "blank-delay-4",
+    feature = "blank-delay-8"
+)))]
 const BLANKING_DELAY: usize = 1;
 
 #[inline]
@@ -101,7 +117,7 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
         let mut entry = Entry::new();
         entry.0 = prev_addr as u16;
 
-        if i == 1 {
+        if i == BLANKING_DELAY {
             entry.0 |= 0b1_0000_0000; // OE
         } else if i == COLS - BLANKING_DELAY - 1 {
             // OE stays false

@@ -143,6 +143,33 @@ Skip drawing black pixels for performance boost in UI applications. When
 enabled, calls to `set_pixel()` with `Color::BLACK` return early without
 writing to the framebuffer, assuming the framebuffer was already cleared.
 
+### `blank-delay-1` / `blank-delay-2` / `blank-delay-4` / `blank-delay-8`
+
+Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted around
+row address changes in the **plain** framebuffers (`plain` and `bitplane::plain`).
+The blanking delay gives the address lines time to settle before the new row is
+latched and lit, preventing ghosting or "bleeding" artifacts between rows.
+
+| Feature         | Blanking cycles |
+|-----------------|-----------------|
+| *(none)*        | 1 (default)     |
+| `blank-delay-1` | 1              |
+| `blank-delay-2` | 2              |
+| `blank-delay-4` | 4              |
+| `blank-delay-8` | 8              |
+
+Higher values reduce ghosting at the cost of slightly less brightness (the LEDs
+are on for less time per scan line). Start with the default and increase only if
+you observe row-transition artifacts on your particular panel hardware.
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.8.0", features = ["blank-delay-4"] }
+```
+
+**Note:** Only one `blank-delay-*` feature should be enabled at a time. If
+multiple are enabled, compile-time cfg conflicts will result.
+
 ### `defmt`
 
 Implement the `defmt::Format` trait so framebuffer types can be logged with
