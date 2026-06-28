@@ -158,6 +158,16 @@ const BLANKING_DELAY: usize = 8;
 )))]
 const BLANKING_DELAY: usize = 1;
 
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u16 = 0b1_0000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u16 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u16 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u16 = 0b1_0000_0000;
+
 /// Creates a pre-computed data template for a row with the specified addresses.
 /// This template contains all the timing and control signals but no pixel data.
 #[inline]
@@ -167,18 +177,16 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
 
     while i < COLS {
         let mut entry = Entry::new();
-        entry.0 = prev_addr as u16;
+        // start with blanking
+        entry.0 = prev_addr as u16 | OE_BLANK;
 
-        // Apply timing control based on position
-        if i == 1 {
-            entry.0 |= 0b1_0000_0000; // set output_enable bit
-        } else if i == COLS - BLANKING_DELAY - 1 {
-            // output_enable already false from initialization
-        } else if i == COLS - 1 {
-            entry.0 |= 0b0010_0000; // set latch bit
-            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // set new address
-        } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
-            entry.0 |= 0b1_0000_0000; // set output_enable bit
+        if i == COLS - 1 {
+            // last pixel is a latch and new address
+            entry.0 |= 0b0010_0000; // latch
+            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
+        } else if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            // active after blanking delay at the start and before blanking delay at the end
+            entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
         data[map_index(i)] = entry;
@@ -243,7 +251,14 @@ impl defmt::Format for Entry {
 
 impl Entry {
     const fn new() -> Self {
-        Self(0)
+        #[cfg(feature = "invert-oe")]
+        {
+            Self(0b1_0000_0000)
+        }
+        #[cfg(not(feature = "invert-oe"))]
+        {
+            Self(0)
+        }
     }
 
     // Optimized color bit manipulation constants and methods
@@ -820,7 +835,7 @@ mod tests {
     #[test]
     fn test_entry_construction() {
         let entry = Entry::new();
-        assert_eq!(entry.0, 0);
+        let expect_oe = cfg!(feature = "invert-oe");
         assert_eq!(entry.dummy2(), false);
         assert_eq!(entry.blu2(), false);
         assert_eq!(entry.grn2(), false);
@@ -828,7 +843,7 @@ mod tests {
         assert_eq!(entry.blu1(), false);
         assert_eq!(entry.grn1(), false);
         assert_eq!(entry.red1(), false);
-        assert_eq!(entry.output_enable(), false);
+        assert_eq!(entry.output_enable(), expect_oe);
         assert_eq!(entry.dummy1(), false);
         assert_eq!(entry.dummy0(), false);
         assert_eq!(entry.latch(), false);
@@ -891,13 +906,14 @@ mod tests {
     #[test]
     fn test_entry_bit_isolation() {
         let mut entry = Entry::new();
+        let expect_oe = cfg!(feature = "invert-oe");
 
         // Test that setting one field doesn't affect others
         entry.set_addr(0b11111);
         entry.set_latch(true);
         assert_eq!(entry.addr(), 0b11111);
         assert_eq!(entry.latch(), true);
-        assert_eq!(entry.output_enable(), false);
+        assert_eq!(entry.output_enable(), expect_oe);
         assert_eq!(entry.red1(), false);
 
         entry.set_red1(true);
@@ -952,9 +968,9 @@ mod tests {
         let row: Row<TEST_COLS> = Row::new();
         assert_eq!(row.data.len(), TEST_COLS);
 
-        // Check that all entries are initialized to zero
+        let expected = Entry::new().0;
         for entry in &row.data {
-            assert_eq!(entry.0, 0);
+            assert_eq!(entry.0, expected);
         }
     }
 
@@ -966,35 +982,25 @@ mod tests {
 
         row.format(test_addr, prev_addr);
 
+        let oe_active = !cfg!(feature = "invert-oe");
+
         // Check data entries configuration
         for (physical_i, entry) in row.data.iter().enumerate() {
             let logical_i = get_mapped_index(physical_i);
 
             match logical_i {
-                i if i == TEST_COLS - BLANKING_DELAY - 1 => {
-                    // Second to last pixel should have output_enable false
-                    assert_eq!(entry.output_enable(), false);
-                    assert_eq!(entry.addr(), prev_addr as u16);
-                    assert_eq!(entry.latch(), false);
-                }
                 i if i == TEST_COLS - 1 => {
-                    // Last pixel should have latch true and new address
                     assert_eq!(entry.latch(), true);
                     assert_eq!(entry.addr(), test_addr as u16);
-                    assert_eq!(entry.output_enable(), false);
-                }
-                1 => {
-                    // First pixel after start should have output_enable true
-                    assert_eq!(entry.output_enable(), true);
-                    assert_eq!(entry.addr(), prev_addr as u16);
-                    assert_eq!(entry.latch(), false);
+                    assert_eq!(entry.output_enable(), !oe_active);
                 }
                 _ => {
-                    // Other pixels should have the previous address and no latch
                     assert_eq!(entry.addr(), prev_addr as u16);
                     assert_eq!(entry.latch(), false);
-                    if logical_i > 1 && logical_i < TEST_COLS - BLANKING_DELAY - 1 {
-                        assert_eq!(entry.output_enable(), true);
+                    if logical_i >= BLANKING_DELAY && logical_i < TEST_COLS - BLANKING_DELAY - 1 {
+                        assert_eq!(entry.output_enable(), oe_active);
+                    } else {
+                        assert_eq!(entry.output_enable(), !oe_active);
                     }
                 }
             }
@@ -1042,10 +1048,10 @@ mod tests {
         assert_eq!(row1, row2);
         assert_eq!(row1.data.len(), row2.data.len());
 
-        // Check that all entries are initialized to zero
+        let expected = Entry::new().0;
         for (entry1, entry2) in row1.data.iter().zip(row2.data.iter()) {
             assert_eq!(entry1.0, entry2.0);
-            assert_eq!(entry1.0, 0);
+            assert_eq!(entry1.0, expected);
         }
     }
 
@@ -1109,14 +1115,13 @@ mod tests {
         // Both should be equivalent
         assert_eq!(frame1.rows.len(), frame2.rows.len());
 
-        // Check that all rows are equivalent
+        let expected = Entry::new().0;
         for (row1, row2) in frame1.rows.iter().zip(frame2.rows.iter()) {
             assert_eq!(row1, row2);
 
-            // Verify all entries are zero-initialized
             for (entry1, entry2) in row1.data.iter().zip(row2.data.iter()) {
                 assert_eq!(entry1.0, entry2.0);
-                assert_eq!(entry1.0, 0);
+                assert_eq!(entry1.0, expected);
             }
         }
     }
@@ -1645,13 +1650,13 @@ mod tests {
 
         row.format(test_addr, prev_addr);
 
-        // Test that the blanking delay is respected
-        let blanking_pixel_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
-        assert_eq!(row.data[blanking_pixel_idx].output_enable(), false);
+        let oe_active = !cfg!(feature = "invert-oe");
 
-        // Test that pixels before blanking delay have output enabled (if after pixel 1)
+        let blanking_pixel_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
+        assert_eq!(row.data[blanking_pixel_idx].output_enable(), !oe_active);
+
         let before_blanking_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 2);
-        assert_eq!(row.data[before_blanking_idx].output_enable(), true);
+        assert_eq!(row.data[before_blanking_idx].output_enable(), oe_active);
     }
 
     #[test]
@@ -1818,5 +1823,35 @@ mod tests {
         assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
         assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
         assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+    }
+
+    #[test]
+    fn test_entry_new_oe_matches_feature() {
+        let entry = Entry::new();
+        if cfg!(feature = "invert-oe") {
+            assert!(entry.output_enable());
+        } else {
+            assert!(!entry.output_enable());
+        }
+    }
+
+    #[test]
+    fn test_make_data_template_oe_polarity() {
+        let mut row = Row::<TEST_COLS>::new();
+        row.format(5, 4);
+
+        let active_idx = get_mapped_index(BLANKING_DELAY);
+        let blank_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
+        let latch_idx = get_mapped_index(TEST_COLS - 1);
+
+        if cfg!(feature = "invert-oe") {
+            assert!(!row.data[active_idx].output_enable());
+            assert!(row.data[blank_idx].output_enable());
+            assert!(row.data[latch_idx].output_enable());
+        } else {
+            assert!(row.data[active_idx].output_enable());
+            assert!(!row.data[blank_idx].output_enable());
+            assert!(!row.data[latch_idx].output_enable());
+        }
     }
 }

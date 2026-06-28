@@ -95,6 +95,16 @@ const BLANKING_DELAY: usize = 8;
 )))]
 const BLANKING_DELAY: usize = 1;
 
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u16 = 0b1_0000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u16 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u16 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u16 = 0b1_0000_0000;
+
 #[inline]
 const fn map_index(i: usize) -> usize {
     #[cfg(feature = "esp32-ordering")]
@@ -114,17 +124,16 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
 
     while i < COLS {
         let mut entry = Entry::new();
-        entry.0 = prev_addr as u16;
+        // start with blanking
+        entry.0 = prev_addr as u16 | OE_BLANK;
 
-        if i == BLANKING_DELAY {
-            entry.0 |= 0b1_0000_0000; // OE
-        } else if i == COLS - BLANKING_DELAY - 1 {
-            // OE stays false
-        } else if i == COLS - 1 {
+        if i == COLS - 1 {
+            // last pixel is a latch and new address
             entry.0 |= 0b0010_0000; // latch
             entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
-        } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
-            entry.0 |= 0b1_0000_0000; // OE
+        } else if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            // active after blanking delay at the start and before blanking delay at the end
+            entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
         data[map_index(i)] = entry;
@@ -162,7 +171,7 @@ impl core::fmt::Debug for Entry {
 
 impl Entry {
     const fn new() -> Self {
-        Self(0)
+        Self(OE_BLANK)
     }
 
     const COLOR0_MASK: u16 = 0b0000_1110_0000_0000; // bits 9-11: R1, G1, B1
@@ -587,14 +596,16 @@ mod tests {
         let mut row = Row::<8>::new();
         row.format(5, 4);
 
-        // i == 1 keeps OE high (visible) with previous address
-        let idx_1 = map_index(1);
-        assert!(row.data[idx_1].output_enable());
-        assert_eq!(row.data[idx_1].addr(), 4);
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        // First active pixel at BLANKING_DELAY with previous address
+        let idx_active = map_index(BLANKING_DELAY);
+        assert_eq!(row.data[idx_active].output_enable(), oe_active);
+        assert_eq!(row.data[idx_active].addr(), 4);
 
         // i == COLS - BLANKING_DELAY - 1 blanks output before latch
         let idx_blank = map_index(8 - BLANKING_DELAY - 1);
-        assert!(!row.data[idx_blank].output_enable());
+        assert_eq!(row.data[idx_blank].output_enable(), !oe_active);
 
         // i == COLS - 1 latches and switches to new address
         let idx_last = map_index(7);
@@ -642,5 +653,35 @@ mod tests {
         let s = format!("{entry:?}");
         assert!(s.contains("Entry"));
         assert!(s.contains("0x"));
+    }
+
+    #[test]
+    fn entry_new_oe_matches_feature() {
+        let entry = Entry::new();
+        if cfg!(feature = "invert-oe") {
+            assert!(entry.output_enable());
+        } else {
+            assert!(!entry.output_enable());
+        }
+    }
+
+    #[test]
+    fn make_data_template_oe_polarity() {
+        let mut row = Row::<8>::new();
+        row.format(5, 4);
+
+        let active_idx = map_index(BLANKING_DELAY);
+        let blank_idx = map_index(8 - BLANKING_DELAY - 1);
+        let latch_idx = map_index(7);
+
+        if cfg!(feature = "invert-oe") {
+            assert!(!row.data[active_idx].output_enable());
+            assert!(row.data[blank_idx].output_enable());
+            assert!(row.data[latch_idx].output_enable());
+        } else {
+            assert!(row.data[active_idx].output_enable());
+            assert!(!row.data[blank_idx].output_enable());
+            assert!(!row.data[latch_idx].output_enable());
+        }
     }
 }

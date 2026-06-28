@@ -34,6 +34,8 @@ esp32-ordering = []
 defmt = ["dep:defmt"]
 doc-images = ["dep:embed-doc-image"]
 
+invert-oe = [] # invert the output enable signal
+
 # these are for the plain framebuffer only
 blank-delay-1 = []
 blank-delay-2 = []
