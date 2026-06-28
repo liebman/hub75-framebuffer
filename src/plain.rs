@@ -435,6 +435,10 @@ pub struct DmaFrameBuffer<
 > {
     _align: u64,
     frames: [Frame<ROWS, COLS, NROWS>; FRAME_COUNT],
+    /// Extra word appended after all frames that drives LATCH=0 and OE=BLANK on
+    /// the final DMA clock edge, preventing the latch from staying asserted.
+    #[cfg(feature = "tail-closes-latch")]
+    tail: Entry,
 }
 
 impl<
@@ -487,6 +491,8 @@ impl<
         let mut instance = Self {
             _align: 0,
             frames: [Frame::new(); FRAME_COUNT],
+            #[cfg(feature = "tail-closes-latch")]
+            tail: Entry::new(),
         };
 
         // Pre-format the framebuffer so it's immediately ready for use
@@ -502,10 +508,19 @@ impl<
     }
 
     /// Returns the byte size of one BCM chunk (for single-plane framebuffers
-    /// this equals the total DMA buffer size, since BCM weighting is baked in).
+    /// this equals the total DMA buffer size including the tail word, since BCM
+    /// weighting is baked in).
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
-        core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
+        let size = core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>();
+        #[cfg(feature = "tail-closes-latch")]
+        {
+            size + core::mem::size_of::<Entry>()
+        }
+        #[cfg(not(feature = "tail-closes-latch"))]
+        {
+            size
+        }
     }
 
     /// Perform full formatting of the framebuffer with timing and control signals.
@@ -531,6 +546,10 @@ impl<
     pub fn format(&mut self) {
         for frame in &mut self.frames {
             frame.format();
+        }
+        #[cfg(feature = "tail-closes-latch")]
+        {
+            self.tail = Entry::new();
         }
     }
 
@@ -702,7 +721,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -719,7 +738,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -734,8 +753,9 @@ impl<
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let brightness_step = 1 << (8 - BITS);
+        let size = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         f.debug_struct("DmaFrameBuffer")
-            .field("size", &core::mem::size_of_val(&self.frames))
+            .field("size", &size)
             .field("frame_count", &self.frames.len())
             .field("frame_size", &core::mem::size_of_val(&self.frames[0]))
             .field("brightness_step", &&brightness_step)
@@ -763,7 +783,11 @@ impl<
             BITS,
             FRAME_COUNT
         );
-        defmt::write!(f, " size: {}", core::mem::size_of_val(&self.frames));
+        defmt::write!(
+            f,
+            " size: {}",
+            core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>()
+        );
         defmt::write!(
             f,
             " frame_size: {}",
@@ -790,7 +814,7 @@ impl<
     fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
         assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -1135,8 +1159,18 @@ mod tests {
 
     #[test]
     fn test_bcm_chunk_info() {
-        let expected_size =
-            core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
+        let expected_size = {
+            let size =
+                core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
+            #[cfg(feature = "tail-closes-latch")]
+            {
+                size + core::mem::size_of::<Entry>()
+            }
+            #[cfg(not(feature = "tail-closes-latch"))]
+            {
+                size
+            }
+        };
         assert_eq!(TestFrameBuffer::bcm_chunk_bytes(), expected_size);
         assert_eq!(TestFrameBuffer::bcm_chunk_count(), 1);
     }
@@ -1525,7 +1559,7 @@ mod tests {
     fn test_read_buffer_implementation() {
         // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
         let fb = TestFrameBuffer::new();
-        let expected_size = core::mem::size_of_val(&fb.frames);
+        let expected_size = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
 
         // Test owned ReadBuffer implementation by calling ReadBuffer::read_buffer explicitly
         unsafe {
@@ -1547,7 +1581,10 @@ mod tests {
         unsafe {
             let (ptr, len) = fb_ref.read_buffer();
             assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
+            assert_eq!(
+                len,
+                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+            );
         }
 
         // Test mutable reference implementation
@@ -1556,7 +1593,10 @@ mod tests {
         unsafe {
             let (ptr, len) = fb_ref.read_buffer();
             assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
+            assert_eq!(
+                len,
+                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+            );
         }
     }
 
@@ -1572,7 +1612,7 @@ mod tests {
         }
 
         let fb = TestFrameBuffer::new();
-        let expected_len = core::mem::size_of_val(&fb.frames);
+        let expected_len = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
 
         let (ptr_valid, actual_len) = test_owned_read_buffer(fb);
         assert!(ptr_valid);

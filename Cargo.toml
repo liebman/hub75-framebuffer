@@ -37,6 +37,7 @@ doc-images = ["dep:embed-doc-image"]
 invert-oe = [] # invert the output enable signal
 
 # these are for the plain framebuffer only
+tail-closes-latch = [] # add a tail word that closes the latch after the data is shifted in
 blank-delay-1 = []
 blank-delay-2 = []
 blank-delay-4 = []

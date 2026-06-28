@@ -108,6 +108,25 @@
 //! hub75-framebuffer = { version = "0.8.1", features = ["esp32-ordering"] }
 //! ```
 //!
+//! ### `tail-closes-latch` Feature (plain framebuffers only)
+//! Appends a single extra "tail" word at the end of the DMA buffer that drives the
+//! LATCH signal LOW (de-asserted) on the final clock edge. Without this feature the
+//! last word in each row asserts LATCH HIGH to latch shifted data into the LED
+//! drivers, and the GPIO pins remain in that state after the DMA transfer completes.
+//! Some hardware configurations (e.g. free-running DMA loops or peripherals that
+//! continue clocking after the descriptor chain ends) can re-latch stale data or
+//! glitch if LATCH is left asserted.
+//!
+//! Enabling `tail-closes-latch` adds one 16-bit `Entry` (for `plain`) or one entry
+//! per bit-plane (for `bitplane::plain`) that parks the bus with LATCH=0 and
+//! OE=BLANK, cleanly terminating the transfer. The cost is a single extra word per
+//! DMA chunk, which is negligible compared to the frame data.
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.8.1", features = ["tail-closes-latch"] }
+//! ```
+//!
 //! ### `defmt` Feature
 //! Implements `defmt::Format` for framebuffer types so they can be emitted with
 //! the `defmt` logging framework. No functional changes; purely adds a trait impl.
