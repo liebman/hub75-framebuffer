@@ -75,7 +75,6 @@ use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
 use crate::FrameBuffer;
-use crate::WordSize;
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 #[cfg(feature = "blank-delay-1")]
@@ -96,6 +95,16 @@ const BLANKING_DELAY: usize = 8;
 )))]
 const BLANKING_DELAY: usize = 1;
 
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u16 = 0b1_0000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u16 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u16 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u16 = 0b1_0000_0000;
+
 #[inline]
 const fn map_index(i: usize) -> usize {
     #[cfg(feature = "esp32-ordering")]
@@ -115,17 +124,16 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
 
     while i < COLS {
         let mut entry = Entry::new();
-        entry.0 = prev_addr as u16;
+        // start with blanking
+        entry.0 = prev_addr as u16 | OE_BLANK;
 
-        if i == BLANKING_DELAY {
-            entry.0 |= 0b1_0000_0000; // OE
-        } else if i == COLS - BLANKING_DELAY - 1 {
-            // OE stays false
-        } else if i == COLS - 1 {
+        if i == COLS - 1 {
+            // last pixel is a latch and new address
             entry.0 |= 0b0010_0000; // latch
             entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
-        } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
-            entry.0 |= 0b1_0000_0000; // OE
+        } else if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            // active after blanking delay at the start and before blanking delay at the end
+            entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
         data[map_index(i)] = entry;
@@ -163,7 +171,7 @@ impl core::fmt::Debug for Entry {
 
 impl Entry {
     const fn new() -> Self {
-        Self(0)
+        Self(OE_BLANK)
     }
 
     const COLOR0_MASK: u16 = 0b0000_1110_0000_0000; // bits 9-11: R1, G1, B1
@@ -220,11 +228,34 @@ impl<const COLS: usize> Default for Row<COLS> {
     }
 }
 
+/// A single bit-plane's DMA payload: all rows for the plane, optionally
+/// followed by a tail word (see the `tail-closes-latch` feature).
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(C)]
+pub struct PlaneData<const NROWS: usize, const COLS: usize> {
+    pub(crate) rows: [Row<COLS>; NROWS],
+    /// Extra word that parks LATCH=0 and OE=BLANK on the GPIO pins after the
+    /// last clock edge, preventing the latch from staying asserted between
+    /// DMA descriptor loops.
+    #[cfg(feature = "tail-closes-latch")]
+    pub(crate) tail: Entry,
+}
+
+impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
+    const fn new() -> Self {
+        Self {
+            rows: [Row::new(); NROWS],
+            #[cfg(feature = "tail-closes-latch")]
+            tail: Entry::new(),
+        }
+    }
+}
+
 /// The entire BCM Frame Buffer (per-plane storage).
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct DmaFrameBuffer<const NROWS: usize, const COLS: usize, const PLANES: usize> {
-    pub(crate) planes: [[Row<COLS>; NROWS]; PLANES],
+    pub(crate) planes: [PlaneData<NROWS, COLS>; PLANES],
 }
 
 impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
@@ -234,7 +265,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     #[must_use]
     pub fn new() -> Self {
         let mut instance = Self {
-            planes: [[Row::new(); NROWS]; PLANES],
+            planes: [PlaneData::new(); PLANES],
         };
         instance.format();
         instance
@@ -246,23 +277,28 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         PLANES
     }
 
-    /// Returns the byte size of one BCM chunk (a single bit-plane).
+    /// Returns the byte size of one BCM chunk (a single bit-plane including tail word).
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
-        NROWS * core::mem::size_of::<Row<COLS>>()
+        core::mem::size_of::<PlaneData<NROWS, COLS>>()
     }
 
     /// Formats the frame buffer with row addresses and control bits.
     #[inline]
     pub fn format(&mut self) {
         for plane in &mut self.planes {
-            for (row_idx, row) in plane.iter_mut().enumerate() {
+            for (row_idx, row) in plane.rows.iter_mut().enumerate() {
                 let prev_addr = if row_idx == 0 {
                     NROWS as u8 - 1
                 } else {
                     row_idx as u8 - 1
                 };
                 row.format(row_idx as u8, prev_addr);
+            }
+            #[cfg(feature = "tail-closes-latch")]
+            {
+                plane.tail = Entry::new();
+                plane.tail.0 = 0x1f | OE_BLANK;
             }
         }
     }
@@ -272,7 +308,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     pub fn erase(&mut self) {
         const MASK: u16 = !0b0111_1110_0000_0000; // clear bits 9-14 (R1,G1,B1,R2,G2,B2)
         for plane in &mut self.planes {
-            for row in plane {
+            for row in &mut plane.rows {
                 for entry in &mut row.data {
                     entry.0 &= MASK;
                 }
@@ -307,7 +343,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
                 | ((u8::from(((green >> bit) & 1) != 0)) << 1)
                 | u8::from(((red >> bit) & 1) != 0);
             let col_idx = map_index(x);
-            let entry = &mut self.planes[plane_idx][row_idx].data[col_idx];
+            let entry = &mut self.planes[plane_idx].rows[row_idx].data[col_idx];
             if is_top {
                 entry.set_color0_bits(bits);
             } else {
@@ -355,9 +391,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> defmt::Format
 impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
     for DmaFrameBuffer<NROWS, COLS, PLANES>
 {
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
+    type Word = u16;
 
     fn plane_count(&self) -> usize {
         PLANES
@@ -368,8 +402,8 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
             plane_idx < PLANES,
             "plane_idx {plane_idx} out of range for {PLANES} planes"
         );
-        let ptr = self.planes[plane_idx].as_ptr().cast::<u8>();
-        let len = NROWS * core::mem::size_of::<Row<COLS>>();
+        let ptr = (&raw const self.planes[plane_idx]).cast::<u8>();
+        let len = core::mem::size_of::<PlaneData<NROWS, COLS>>();
         (ptr, len)
     }
 }
@@ -426,14 +460,15 @@ mod tests {
     use embedded_graphics::prelude::*;
     use std::format;
 
+    const TEST_COLS: usize = 64;
     type TestBuffer = DmaFrameBuffer<16, 64, 8>;
 
     #[test]
     fn row_format_sets_address_and_control_bits() {
-        let mut row = Row::<8>::new();
+        let mut row = Row::<TEST_COLS>::new();
         row.format(5, 4);
 
-        let last_idx = map_index(7);
+        let last_idx = map_index(TEST_COLS - 1);
         assert_eq!(row.data[last_idx].latch(), true);
         assert_eq!(row.data[last_idx].addr(), 5);
 
@@ -451,10 +486,13 @@ mod tests {
             for row_idx in 0..16 {
                 let last_col = map_index(63);
                 assert_eq!(
-                    fb.planes[plane_idx][row_idx].data[last_col].addr(),
+                    fb.planes[plane_idx].rows[row_idx].data[last_col].addr(),
                     row_idx as u16
                 );
-                assert_eq!(fb.planes[plane_idx][row_idx].data[last_col].latch(), true);
+                assert_eq!(
+                    fb.planes[plane_idx].rows[row_idx].data[last_col].latch(),
+                    true
+                );
             }
         }
     }
@@ -467,7 +505,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][3].data[map_index(2)];
+            let entry = fb.planes[plane_idx].rows[3].data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
@@ -482,7 +520,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][4].data[map_index(4)];
+            let entry = fb.planes[plane_idx].rows[4].data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
@@ -492,12 +530,12 @@ mod tests {
     #[test]
     fn erase_clears_only_color_bits() {
         let mut fb = TestBuffer::new();
-        let oe_before = fb.planes[0][0].data[map_index(1)].output_enable();
+        let oe_before = fb.planes[0].rows[0].data[map_index(1)].output_enable();
         fb.set_pixel(Point::new(0, 0), Color::WHITE);
         fb.erase();
 
         for plane in &fb.planes {
-            for row in plane {
+            for row in &plane.rows {
                 for entry in &row.data {
                     assert!(!entry.red1());
                     assert!(!entry.grn1());
@@ -510,7 +548,7 @@ mod tests {
         }
 
         assert_eq!(
-            fb.planes[0][0].data[map_index(1)].output_enable(),
+            fb.planes[0].rows[0].data[map_index(1)].output_enable(),
             oe_before
         );
     }
@@ -524,7 +562,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][1].data[map_index(1)];
+            let entry = fb.planes[plane_idx].rows[1].data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
             assert!(!entry.blu1());
@@ -547,20 +585,20 @@ mod tests {
         assert_eq!(TestBuffer::bcm_chunk_count(), 8);
         assert_eq!(
             TestBuffer::bcm_chunk_bytes(),
-            16 * core::mem::size_of::<Row<64>>()
+            core::mem::size_of::<PlaneData<16, 64>>()
         );
     }
 
     #[test]
     fn frame_buffer_trait_accessors_report_expected_values() {
         let fb = TestBuffer::new();
-        let as_trait: &dyn FrameBuffer = &fb;
-        assert_eq!(as_trait.get_word_size(), WordSize::Sixteen);
+        let as_trait: &dyn FrameBuffer<Word = u16> = &fb;
+        assert_eq!(as_trait.get_word_size(), crate::WordSize::Sixteen);
         assert_eq!(as_trait.plane_count(), 8);
 
         let (ptr, len) = as_trait.plane_ptr_len(0);
-        assert_eq!(len, 16 * core::mem::size_of::<Row<64>>());
-        assert_eq!(ptr, fb.planes[0].as_ptr().cast::<u8>());
+        assert_eq!(len, core::mem::size_of::<PlaneData<16, 64>>());
+        assert_eq!(ptr, (&raw const fb.planes[0]).cast::<u8>());
     }
 
     #[test]
@@ -587,28 +625,30 @@ mod tests {
 
     #[test]
     fn row_format_sets_expected_blank_and_latch_positions() {
-        let mut row = Row::<8>::new();
+        let mut row = Row::<TEST_COLS>::new();
         row.format(5, 4);
 
-        // i == 1 keeps OE high (visible) with previous address
-        let idx_1 = map_index(1);
-        assert!(row.data[idx_1].output_enable());
-        assert_eq!(row.data[idx_1].addr(), 4);
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        // First active pixel at BLANKING_DELAY with previous address
+        let idx_active = map_index(BLANKING_DELAY);
+        assert_eq!(row.data[idx_active].output_enable(), oe_active);
+        assert_eq!(row.data[idx_active].addr(), 4);
 
         // i == COLS - BLANKING_DELAY - 1 blanks output before latch
-        let idx_blank = map_index(8 - BLANKING_DELAY - 1);
-        assert!(!row.data[idx_blank].output_enable());
+        let idx_blank = map_index(TEST_COLS - BLANKING_DELAY - 1);
+        assert_eq!(row.data[idx_blank].output_enable(), !oe_active);
 
         // i == COLS - 1 latches and switches to new address
-        let idx_last = map_index(7);
+        let idx_last = map_index(TEST_COLS - 1);
         assert!(row.data[idx_last].latch());
         assert_eq!(row.data[idx_last].addr(), 5);
     }
 
     #[test]
     fn default_constructors_match_new() {
-        let row_default = Row::<8>::default();
-        let row_new = Row::<8>::new();
+        let row_default = Row::<TEST_COLS>::default();
+        let row_new = Row::<TEST_COLS>::new();
         assert_eq!(row_default, row_new);
 
         let fb_default = TestBuffer::default();
@@ -621,11 +661,11 @@ mod tests {
         let mut fb = TestBuffer::new();
         FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
 
-        assert!(fb.planes[0][5].data[map_index(3)].grn1());
+        assert!(fb.planes[0].rows[5].data[map_index(3)].grn1());
 
         FrameBufferOperations::erase(&mut fb);
         for plane in &fb.planes {
-            for row in plane {
+            for row in &plane.rows {
                 for entry in &row.data {
                     assert!(!entry.red1());
                     assert!(!entry.grn1());
@@ -645,5 +685,35 @@ mod tests {
         let s = format!("{entry:?}");
         assert!(s.contains("Entry"));
         assert!(s.contains("0x"));
+    }
+
+    #[test]
+    fn entry_new_oe_matches_feature() {
+        let entry = Entry::new();
+        if cfg!(feature = "invert-oe") {
+            assert!(entry.output_enable());
+        } else {
+            assert!(!entry.output_enable());
+        }
+    }
+
+    #[test]
+    fn make_data_template_oe_polarity() {
+        let mut row = Row::<TEST_COLS>::new();
+        row.format(5, 4);
+
+        let active_idx = map_index(BLANKING_DELAY);
+        let blank_idx = map_index(TEST_COLS - BLANKING_DELAY - 1);
+        let latch_idx = map_index(TEST_COLS - 1);
+
+        if cfg!(feature = "invert-oe") {
+            assert!(!row.data[active_idx].output_enable());
+            assert!(row.data[blank_idx].output_enable());
+            assert!(row.data[latch_idx].output_enable());
+        } else {
+            assert!(row.data[active_idx].output_enable());
+            assert!(!row.data[blank_idx].output_enable());
+            assert!(!row.data[latch_idx].output_enable());
+        }
     }
 }

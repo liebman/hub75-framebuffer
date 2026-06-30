@@ -75,7 +75,6 @@ use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
 use crate::FrameBuffer;
-use crate::WordSize;
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 bitfield! {
@@ -348,9 +347,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> defmt::Format
 impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
     for DmaFrameBuffer<NROWS, COLS, PLANES>
 {
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Eight
-    }
+    type Word = u8;
 
     fn plane_count(&self) -> usize {
         PLANES
@@ -547,8 +544,8 @@ mod tests {
     #[test]
     fn frame_buffer_trait_accessors_report_expected_values() {
         let fb = TestBuffer::new();
-        let as_trait: &dyn FrameBuffer = &fb;
-        assert_eq!(as_trait.get_word_size(), WordSize::Eight);
+        let as_trait: &dyn FrameBuffer<Word = u8> = &fb;
+        assert_eq!(as_trait.get_word_size(), crate::WordSize::Eight);
         assert_eq!(as_trait.plane_count(), 8);
 
         let (ptr, len) = as_trait.plane_ptr_len(0);

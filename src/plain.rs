@@ -139,7 +139,6 @@ use embedded_graphics::prelude::Point;
 
 use super::Color;
 use super::FrameBuffer;
-use super::WordSize;
 
 #[cfg(feature = "blank-delay-1")]
 const BLANKING_DELAY: usize = 1;
@@ -159,6 +158,16 @@ const BLANKING_DELAY: usize = 8;
 )))]
 const BLANKING_DELAY: usize = 1;
 
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u16 = 0b1_0000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u16 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u16 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u16 = 0b1_0000_0000;
+
 /// Creates a pre-computed data template for a row with the specified addresses.
 /// This template contains all the timing and control signals but no pixel data.
 #[inline]
@@ -168,18 +177,16 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
 
     while i < COLS {
         let mut entry = Entry::new();
-        entry.0 = prev_addr as u16;
+        // start with blanking
+        entry.0 = prev_addr as u16 | OE_BLANK;
 
-        // Apply timing control based on position
-        if i == 1 {
-            entry.0 |= 0b1_0000_0000; // set output_enable bit
-        } else if i == COLS - BLANKING_DELAY - 1 {
-            // output_enable already false from initialization
-        } else if i == COLS - 1 {
-            entry.0 |= 0b0010_0000; // set latch bit
-            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // set new address
-        } else if i > 1 && i < COLS - BLANKING_DELAY - 1 {
-            entry.0 |= 0b1_0000_0000; // set output_enable bit
+        if i == COLS - 1 {
+            // last pixel is a latch and new address
+            entry.0 |= 0b0010_0000; // latch
+            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
+        } else if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            // active after blanking delay at the start and before blanking delay at the end
+            entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
         data[map_index(i)] = entry;
@@ -244,7 +251,14 @@ impl defmt::Format for Entry {
 
 impl Entry {
     const fn new() -> Self {
-        Self(0)
+        #[cfg(feature = "invert-oe")]
+        {
+            Self(0b1_0000_0000)
+        }
+        #[cfg(not(feature = "invert-oe"))]
+        {
+            Self(0)
+        }
     }
 
     // Optimized color bit manipulation constants and methods
@@ -421,6 +435,10 @@ pub struct DmaFrameBuffer<
 > {
     _align: u64,
     frames: [Frame<ROWS, COLS, NROWS>; FRAME_COUNT],
+    /// Extra word appended after all frames that drives LATCH=0 and OE=BLANK on
+    /// the final DMA clock edge, preventing the latch from staying asserted.
+    #[cfg(feature = "tail-closes-latch")]
+    tail: Entry,
 }
 
 impl<
@@ -473,6 +491,8 @@ impl<
         let mut instance = Self {
             _align: 0,
             frames: [Frame::new(); FRAME_COUNT],
+            #[cfg(feature = "tail-closes-latch")]
+            tail: Entry::new(),
         };
 
         // Pre-format the framebuffer so it's immediately ready for use
@@ -488,10 +508,19 @@ impl<
     }
 
     /// Returns the byte size of one BCM chunk (for single-plane framebuffers
-    /// this equals the total DMA buffer size, since BCM weighting is baked in).
+    /// this equals the total DMA buffer size including the tail word, since BCM
+    /// weighting is baked in).
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
-        core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
+        let size = core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>();
+        #[cfg(feature = "tail-closes-latch")]
+        {
+            size + core::mem::size_of::<Entry>()
+        }
+        #[cfg(not(feature = "tail-closes-latch"))]
+        {
+            size
+        }
     }
 
     /// Perform full formatting of the framebuffer with timing and control signals.
@@ -517,6 +546,10 @@ impl<
     pub fn format(&mut self) {
         for frame in &mut self.frames {
             frame.format();
+        }
+        #[cfg(feature = "tail-closes-latch")]
+        {
+            self.tail = Entry::new();
         }
     }
 
@@ -688,7 +721,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -705,7 +738,7 @@ unsafe impl<
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -720,8 +753,9 @@ impl<
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let brightness_step = 1 << (8 - BITS);
+        let size = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         f.debug_struct("DmaFrameBuffer")
-            .field("size", &core::mem::size_of_val(&self.frames))
+            .field("size", &size)
             .field("frame_count", &self.frames.len())
             .field("frame_size", &core::mem::size_of_val(&self.frames[0]))
             .field("brightness_step", &&brightness_step)
@@ -749,7 +783,11 @@ impl<
             BITS,
             FRAME_COUNT
         );
-        defmt::write!(f, " size: {}", core::mem::size_of_val(&self.frames));
+        defmt::write!(
+            f,
+            " size: {}",
+            core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>()
+        );
         defmt::write!(
             f,
             " frame_size: {}",
@@ -767,9 +805,7 @@ impl<
         const FRAME_COUNT: usize,
     > FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
+    type Word = u16;
 
     fn plane_count(&self) -> usize {
         1
@@ -778,31 +814,7 @@ impl<
     fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
         assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
         let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
-    }
-}
-
-impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    fn get_word_size(&self) -> WordSize {
-        WordSize::Sixteen
-    }
-
-    fn plane_count(&self) -> usize {
-        1
-    }
-
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
+        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
         (ptr, len)
     }
 }
@@ -847,7 +859,7 @@ mod tests {
     #[test]
     fn test_entry_construction() {
         let entry = Entry::new();
-        assert_eq!(entry.0, 0);
+        let expect_oe = cfg!(feature = "invert-oe");
         assert_eq!(entry.dummy2(), false);
         assert_eq!(entry.blu2(), false);
         assert_eq!(entry.grn2(), false);
@@ -855,7 +867,7 @@ mod tests {
         assert_eq!(entry.blu1(), false);
         assert_eq!(entry.grn1(), false);
         assert_eq!(entry.red1(), false);
-        assert_eq!(entry.output_enable(), false);
+        assert_eq!(entry.output_enable(), expect_oe);
         assert_eq!(entry.dummy1(), false);
         assert_eq!(entry.dummy0(), false);
         assert_eq!(entry.latch(), false);
@@ -918,13 +930,14 @@ mod tests {
     #[test]
     fn test_entry_bit_isolation() {
         let mut entry = Entry::new();
+        let expect_oe = cfg!(feature = "invert-oe");
 
         // Test that setting one field doesn't affect others
         entry.set_addr(0b11111);
         entry.set_latch(true);
         assert_eq!(entry.addr(), 0b11111);
         assert_eq!(entry.latch(), true);
-        assert_eq!(entry.output_enable(), false);
+        assert_eq!(entry.output_enable(), expect_oe);
         assert_eq!(entry.red1(), false);
 
         entry.set_red1(true);
@@ -979,9 +992,9 @@ mod tests {
         let row: Row<TEST_COLS> = Row::new();
         assert_eq!(row.data.len(), TEST_COLS);
 
-        // Check that all entries are initialized to zero
+        let expected = Entry::new().0;
         for entry in &row.data {
-            assert_eq!(entry.0, 0);
+            assert_eq!(entry.0, expected);
         }
     }
 
@@ -993,35 +1006,25 @@ mod tests {
 
         row.format(test_addr, prev_addr);
 
+        let oe_active = !cfg!(feature = "invert-oe");
+
         // Check data entries configuration
         for (physical_i, entry) in row.data.iter().enumerate() {
             let logical_i = get_mapped_index(physical_i);
 
             match logical_i {
-                i if i == TEST_COLS - BLANKING_DELAY - 1 => {
-                    // Second to last pixel should have output_enable false
-                    assert_eq!(entry.output_enable(), false);
-                    assert_eq!(entry.addr(), prev_addr as u16);
-                    assert_eq!(entry.latch(), false);
-                }
                 i if i == TEST_COLS - 1 => {
-                    // Last pixel should have latch true and new address
                     assert_eq!(entry.latch(), true);
                     assert_eq!(entry.addr(), test_addr as u16);
-                    assert_eq!(entry.output_enable(), false);
-                }
-                1 => {
-                    // First pixel after start should have output_enable true
-                    assert_eq!(entry.output_enable(), true);
-                    assert_eq!(entry.addr(), prev_addr as u16);
-                    assert_eq!(entry.latch(), false);
+                    assert_eq!(entry.output_enable(), !oe_active);
                 }
                 _ => {
-                    // Other pixels should have the previous address and no latch
                     assert_eq!(entry.addr(), prev_addr as u16);
                     assert_eq!(entry.latch(), false);
-                    if logical_i > 1 && logical_i < TEST_COLS - BLANKING_DELAY - 1 {
-                        assert_eq!(entry.output_enable(), true);
+                    if logical_i >= BLANKING_DELAY && logical_i < TEST_COLS - BLANKING_DELAY - 1 {
+                        assert_eq!(entry.output_enable(), oe_active);
+                    } else {
+                        assert_eq!(entry.output_enable(), !oe_active);
                     }
                 }
             }
@@ -1069,10 +1072,10 @@ mod tests {
         assert_eq!(row1, row2);
         assert_eq!(row1.data.len(), row2.data.len());
 
-        // Check that all entries are initialized to zero
+        let expected = Entry::new().0;
         for (entry1, entry2) in row1.data.iter().zip(row2.data.iter()) {
             assert_eq!(entry1.0, entry2.0);
-            assert_eq!(entry1.0, 0);
+            assert_eq!(entry1.0, expected);
         }
     }
 
@@ -1136,14 +1139,13 @@ mod tests {
         // Both should be equivalent
         assert_eq!(frame1.rows.len(), frame2.rows.len());
 
-        // Check that all rows are equivalent
+        let expected = Entry::new().0;
         for (row1, row2) in frame1.rows.iter().zip(frame2.rows.iter()) {
             assert_eq!(row1, row2);
 
-            // Verify all entries are zero-initialized
             for (entry1, entry2) in row1.data.iter().zip(row2.data.iter()) {
                 assert_eq!(entry1.0, entry2.0);
-                assert_eq!(entry1.0, 0);
+                assert_eq!(entry1.0, expected);
             }
         }
     }
@@ -1157,8 +1159,18 @@ mod tests {
 
     #[test]
     fn test_bcm_chunk_info() {
-        let expected_size =
-            core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
+        let expected_size = {
+            let size =
+                core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
+            #[cfg(feature = "tail-closes-latch")]
+            {
+                size + core::mem::size_of::<Entry>()
+            }
+            #[cfg(not(feature = "tail-closes-latch"))]
+            {
+                size
+            }
+        };
         assert_eq!(TestFrameBuffer::bcm_chunk_bytes(), expected_size);
         assert_eq!(TestFrameBuffer::bcm_chunk_count(), 1);
     }
@@ -1547,7 +1559,7 @@ mod tests {
     fn test_read_buffer_implementation() {
         // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
         let fb = TestFrameBuffer::new();
-        let expected_size = core::mem::size_of_val(&fb.frames);
+        let expected_size = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
 
         // Test owned ReadBuffer implementation by calling ReadBuffer::read_buffer explicitly
         unsafe {
@@ -1569,7 +1581,10 @@ mod tests {
         unsafe {
             let (ptr, len) = fb_ref.read_buffer();
             assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
+            assert_eq!(
+                len,
+                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+            );
         }
 
         // Test mutable reference implementation
@@ -1578,7 +1593,10 @@ mod tests {
         unsafe {
             let (ptr, len) = fb_ref.read_buffer();
             assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
+            assert_eq!(
+                len,
+                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+            );
         }
     }
 
@@ -1594,7 +1612,7 @@ mod tests {
         }
 
         let fb = TestFrameBuffer::new();
-        let expected_len = core::mem::size_of_val(&fb.frames);
+        let expected_len = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
 
         let (ptr_valid, actual_len) = test_owned_read_buffer(fb);
         assert!(ptr_valid);
@@ -1672,13 +1690,13 @@ mod tests {
 
         row.format(test_addr, prev_addr);
 
-        // Test that the blanking delay is respected
-        let blanking_pixel_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
-        assert_eq!(row.data[blanking_pixel_idx].output_enable(), false);
+        let oe_active = !cfg!(feature = "invert-oe");
 
-        // Test that pixels before blanking delay have output enabled (if after pixel 1)
+        let blanking_pixel_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
+        assert_eq!(row.data[blanking_pixel_idx].output_enable(), !oe_active);
+
         let before_blanking_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 2);
-        assert_eq!(row.data[before_blanking_idx].output_enable(), true);
+        assert_eq!(row.data[before_blanking_idx].output_enable(), oe_active);
     }
 
     #[test]
@@ -1845,5 +1863,35 @@ mod tests {
         assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
         assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
         assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+    }
+
+    #[test]
+    fn test_entry_new_oe_matches_feature() {
+        let entry = Entry::new();
+        if cfg!(feature = "invert-oe") {
+            assert!(entry.output_enable());
+        } else {
+            assert!(!entry.output_enable());
+        }
+    }
+
+    #[test]
+    fn test_make_data_template_oe_polarity() {
+        let mut row = Row::<TEST_COLS>::new();
+        row.format(5, 4);
+
+        let active_idx = get_mapped_index(BLANKING_DELAY);
+        let blank_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
+        let latch_idx = get_mapped_index(TEST_COLS - 1);
+
+        if cfg!(feature = "invert-oe") {
+            assert!(!row.data[active_idx].output_enable());
+            assert!(row.data[blank_idx].output_enable());
+            assert!(row.data[latch_idx].output_enable());
+        } else {
+            assert!(row.data[active_idx].output_enable());
+            assert!(!row.data[blank_idx].output_enable());
+            assert!(!row.data[latch_idx].output_enable());
+        }
     }
 }
