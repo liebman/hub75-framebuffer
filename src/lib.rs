@@ -93,7 +93,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.8.1", features = ["skip-black-pixels"] }
+//! hub75-framebuffer = { version = "0.9.0", features = ["skip-black-pixels"] }
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
@@ -105,7 +105,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.8.1", features = ["esp32-ordering"] }
+//! hub75-framebuffer = { version = "0.9.0", features = ["esp32-ordering"] }
 //! ```
 //!
 //! ### `tail-closes-latch` Feature (plain framebuffers only)
@@ -124,7 +124,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.8.1", features = ["tail-closes-latch"] }
+//! hub75-framebuffer = { version = "0.9.0", features = ["tail-closes-latch"] }
 //! ```
 //!
 //! ### `defmt` Feature
