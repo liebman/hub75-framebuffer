@@ -234,9 +234,12 @@ impl<const COLS: usize> Default for Row<COLS> {
 #[repr(C)]
 pub struct PlaneData<const NROWS: usize, const COLS: usize> {
     pub(crate) rows: [Row<COLS>; NROWS],
-    /// Extra word that parks LATCH=0 and OE=BLANK on the GPIO pins after the
-    /// last clock edge, preventing the latch from staying asserted between
-    /// DMA descriptor loops.
+    // Extra word that parks LATCH=0 and OE=BLANK on the GPIO pins after the
+    // last clock edge, preventing the latch from staying asserted between
+    // DMA descriptor loops.  On an esp32 the words are also re-ordered (swapped) so
+    // we need a padding word.
+    #[cfg(all(feature = "tail-closes-latch", feature = "esp32-ordering"))]
+    pub(crate) padding: Entry,
     #[cfg(feature = "tail-closes-latch")]
     pub(crate) tail: Entry,
 }
@@ -245,6 +248,8 @@ impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
     const fn new() -> Self {
         Self {
             rows: [Row::new(); NROWS],
+            #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+            padding: Entry::new(),
             #[cfg(feature = "tail-closes-latch")]
             tail: Entry::new(),
         }
@@ -297,8 +302,11 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             }
             #[cfg(feature = "tail-closes-latch")]
             {
-                plane.tail = Entry::new();
                 plane.tail.0 = 0x1f | OE_BLANK;
+            }
+            #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+            {
+                plane.padding.0 = 0x1f | OE_BLANK;
             }
         }
     }

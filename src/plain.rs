@@ -400,6 +400,33 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Default
     }
 }
 
+/// All BCM frames for this framebuffer, optionally followed by a tail word
+/// (see the `tail-closes-latch` feature).
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+struct FrameData<const ROWS: usize, const COLS: usize, const NROWS: usize, const FRAME_COUNT: usize>
+{
+    frames: [Frame<ROWS, COLS, NROWS>; FRAME_COUNT],
+    #[cfg(all(feature = "tail-closes-latch", feature = "esp32-ordering"))]
+    padding: Entry,
+    #[cfg(feature = "tail-closes-latch")]
+    tail: Entry,
+}
+
+impl<const ROWS: usize, const COLS: usize, const NROWS: usize, const FRAME_COUNT: usize>
+    FrameData<ROWS, COLS, NROWS, FRAME_COUNT>
+{
+    const fn new() -> Self {
+        Self {
+            frames: [Frame::new(); FRAME_COUNT],
+            #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+            padding: Entry::new(),
+            #[cfg(feature = "tail-closes-latch")]
+            tail: Entry::new(),
+        }
+    }
+}
+
 /// DMA-compatible framebuffer for HUB75 LED panels.
 ///
 /// This is a framebuffer implementation that:
@@ -434,11 +461,7 @@ pub struct DmaFrameBuffer<
     const FRAME_COUNT: usize,
 > {
     _align: u64,
-    frames: [Frame<ROWS, COLS, NROWS>; FRAME_COUNT],
-    /// Extra word appended after all frames that drives LATCH=0 and OE=BLANK on
-    /// the final DMA clock edge, preventing the latch from staying asserted.
-    #[cfg(feature = "tail-closes-latch")]
-    tail: Entry,
+    data: FrameData<ROWS, COLS, NROWS, FRAME_COUNT>,
 }
 
 impl<
@@ -490,9 +513,7 @@ impl<
 
         let mut instance = Self {
             _align: 0,
-            frames: [Frame::new(); FRAME_COUNT],
-            #[cfg(feature = "tail-closes-latch")]
-            tail: Entry::new(),
+            data: FrameData::new(),
         };
 
         // Pre-format the framebuffer so it's immediately ready for use
@@ -512,15 +533,7 @@ impl<
     /// weighting is baked in).
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
-        let size = core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>();
-        #[cfg(feature = "tail-closes-latch")]
-        {
-            size + core::mem::size_of::<Entry>()
-        }
-        #[cfg(not(feature = "tail-closes-latch"))]
-        {
-            size
-        }
+        core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>()
     }
 
     /// Perform full formatting of the framebuffer with timing and control signals.
@@ -544,12 +557,16 @@ impl<
     /// ```
     #[inline]
     pub fn format(&mut self) {
-        for frame in &mut self.frames {
+        for frame in &mut self.data.frames {
             frame.format();
         }
         #[cfg(feature = "tail-closes-latch")]
         {
-            self.tail = Entry::new();
+            self.data.tail.0 = 0x1f | OE_BLANK;
+        }
+        #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+        {
+            self.data.padding.0 = 0x1f | OE_BLANK;
         }
     }
 
@@ -574,7 +591,7 @@ impl<
     /// ```
     #[inline]
     pub fn erase(&mut self) {
-        for frame in &mut self.frames {
+        for frame in &mut self.data.frames {
             frame.clear_colors();
         }
     }
@@ -626,7 +643,7 @@ impl<
         let blue_frames = Self::frames_on(color.b());
 
         // Set the pixel in all frames based on pre-computed frame counts
-        for (frame_idx, frame) in self.frames.iter_mut().enumerate() {
+        for (frame_idx, frame) in self.data.frames.iter_mut().enumerate() {
             frame.set_pixel(
                 y,
                 x,
@@ -720,8 +737,8 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
+        let ptr = (&raw const self.data).cast::<u8>();
+        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
         (ptr, len)
     }
 }
@@ -737,8 +754,8 @@ unsafe impl<
     type Word = u8;
 
     unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
+        let ptr = (&raw const self.data).cast::<u8>();
+        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
         (ptr, len)
     }
 }
@@ -753,11 +770,11 @@ impl<
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let brightness_step = 1 << (8 - BITS);
-        let size = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
+        let size = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
         f.debug_struct("DmaFrameBuffer")
             .field("size", &size)
-            .field("frame_count", &self.frames.len())
-            .field("frame_size", &core::mem::size_of_val(&self.frames[0]))
+            .field("frame_count", &self.data.frames.len())
+            .field("frame_size", &core::mem::size_of_val(&self.data.frames[0]))
             .field("brightness_step", &&brightness_step)
             .finish_non_exhaustive()
     }
@@ -786,12 +803,12 @@ impl<
         defmt::write!(
             f,
             " size: {}",
-            core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>()
+            core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>()
         );
         defmt::write!(
             f,
             " frame_size: {}",
-            core::mem::size_of_val(&self.frames[0])
+            core::mem::size_of_val(&self.data.frames[0])
         );
         defmt::write!(f, " brightness_step: {}", brightness_step);
     }
@@ -813,8 +830,8 @@ impl<
 
     fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
         assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames) + core::mem::size_of::<Entry>();
+        let ptr = (&raw const self.data).cast::<u8>();
+        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
         (ptr, len)
     }
 }
@@ -1153,24 +1170,14 @@ mod tests {
     #[test]
     fn test_dma_framebuffer_construction() {
         let fb = TestFrameBuffer::new();
-        assert_eq!(fb.frames.len(), TEST_FRAME_COUNT);
+        assert_eq!(fb.data.frames.len(), TEST_FRAME_COUNT);
         assert_eq!(fb._align, 0);
     }
 
     #[test]
     fn test_bcm_chunk_info() {
-        let expected_size = {
-            let size =
-                core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
-            #[cfg(feature = "tail-closes-latch")]
-            {
-                size + core::mem::size_of::<Entry>()
-            }
-            #[cfg(not(feature = "tail-closes-latch"))]
-            {
-                size
-            }
-        };
+        let expected_size =
+            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
         assert_eq!(TestFrameBuffer::bcm_chunk_bytes(), expected_size);
         assert_eq!(TestFrameBuffer::bcm_chunk_count(), 1);
     }
@@ -1180,7 +1187,7 @@ mod tests {
         let fb = TestFrameBuffer::new();
 
         // After erasing, all frames should be formatted
-        for frame in &fb.frames {
+        for frame in &fb.data.frames {
             for addr in 0..TEST_NROWS {
                 let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
 
@@ -1223,7 +1230,7 @@ mod tests {
         // With 3-bit depth, brightness steps are 32 (256/8)
         // Frames represent thresholds: 32, 64, 96, 128, 160, 192, 224
         // Red value 255 should activate all frames
-        for frame in &fb.frames {
+        for frame in &fb.data.frames {
             // Check upper half pixel
             let mapped_col_10 = get_mapped_index(10);
             assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
@@ -1249,7 +1256,7 @@ mod tests {
 
         // Should activate frames 0, 1, 2 (thresholds 32, 64, 96)
         // but not frames 3, 4, 5, 6 (thresholds 128, 160, 192, 224)
-        for (frame_idx, frame) in fb.frames.iter().enumerate() {
+        for (frame_idx, frame) in fb.data.frames.iter().enumerate() {
             let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
             let should_be_active = test_brightness >= frame_threshold;
 
@@ -1322,7 +1329,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Check the first frame only
-        let first_frame = &fb.frames[0];
+        let first_frame = &fb.data.frames[0];
         let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
         let first_frame_threshold = brightness_step; // 32
 
@@ -1467,17 +1474,17 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
     }
 
     #[test]
@@ -1490,17 +1497,17 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
     }
 
     #[test]
@@ -1513,7 +1520,7 @@ mod tests {
         let mapped_col_10 = get_mapped_index(10);
 
         // Verify white pixel is lit in all frames (255 >= all thresholds)
-        for frame in fb.frames.iter() {
+        for frame in fb.data.frames.iter() {
             // White (255) should be active in all frames since it's >= all thresholds
             assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
             assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
@@ -1529,7 +1536,7 @@ mod tests {
         // 128 should activate frames 0, 1, 2, 3 (thresholds 32, 64, 96, 128)
         // but not frames 4, 5, 6 (thresholds 160, 192, 224)
         let brightness_step = 1 << (8 - TEST_BITS); // 32 for 3-bit
-        for (frame_idx, frame) in fb.frames.iter().enumerate() {
+        for (frame_idx, frame) in fb.data.frames.iter().enumerate() {
             let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
             let should_be_active = 128 >= frame_threshold;
 
@@ -1542,14 +1549,14 @@ mod tests {
         // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
         for frame_idx in 0..4 {
             assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.data.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
                 true
             );
         }
         // Frames 4-6 should be inactive (thresholds 160, 192, 224)
         for frame_idx in 4..TEST_FRAME_COUNT {
             assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.data.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
                 false
             );
         }
@@ -1559,7 +1566,8 @@ mod tests {
     fn test_read_buffer_implementation() {
         // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
         let fb = TestFrameBuffer::new();
-        let expected_size = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
+        let expected_size =
+            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
 
         // Test owned ReadBuffer implementation by calling ReadBuffer::read_buffer explicitly
         unsafe {
@@ -1583,7 +1591,8 @@ mod tests {
             assert!(!ptr.is_null());
             assert_eq!(
                 len,
-                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+                core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>(
+                )
             );
         }
 
@@ -1595,7 +1604,8 @@ mod tests {
             assert!(!ptr.is_null());
             assert_eq!(
                 len,
-                core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>()
+                core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>(
+                )
             );
         }
     }
@@ -1612,7 +1622,8 @@ mod tests {
         }
 
         let fb = TestFrameBuffer::new();
-        let expected_len = core::mem::size_of_val(&fb.frames) + core::mem::size_of::<Entry>();
+        let expected_len =
+            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
 
         let (ptr_valid, actual_len) = test_owned_read_buffer(fb);
         assert!(ptr_valid);
@@ -1648,7 +1659,7 @@ mod tests {
         let fb2 = TestFrameBuffer::default();
 
         // Both should be equivalent in size, but may differ in content since new() calls format()
-        assert_eq!(fb1.frames.len(), fb2.frames.len());
+        assert_eq!(fb1.data.frames.len(), fb2.data.frames.len());
         assert_eq!(fb1._align, fb2._align);
     }
 
@@ -1737,19 +1748,19 @@ mod tests {
 
         // Verify pixels are set
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
 
         // Clear using fast method
         fb.erase();
 
         // Verify pixels are cleared but timing signals remain
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
 
         // Verify timing signals are still present (check last pixel has latch)
         let last_col = get_mapped_index(TEST_COLS - 1);
-        assert_eq!(fb.frames[0].rows[5].data[last_col].latch(), true);
+        assert_eq!(fb.data.frames[0].rows[5].data[last_col].latch(), true);
     }
 
     // Remove the old `test_draw_char_bottom_right` and replace with a helper + combined test.
@@ -1793,7 +1804,7 @@ mod tests {
                 // }
 
                 // Fetch Entry from frame 0
-                let frame0 = &fb.frames[0];
+                let frame0 = &fb.data.frames[0];
                 let e = if gy < TEST_NROWS {
                     &frame0.rows[gy].data[get_mapped_index(gx)]
                 } else {
@@ -1840,12 +1851,12 @@ mod tests {
         // Verify colors cleared on frame 0
         let mc10 = get_mapped_index(10);
         let mc20 = get_mapped_index(20);
-        assert_eq!(fb.frames[0].rows[5].data[mc10].red1(), false);
-        assert_eq!(fb.frames[0].rows[10].data[mc20].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[5].data[mc10].red1(), false);
+        assert_eq!(fb.data.frames[0].rows[10].data[mc20].grn1(), false);
 
         // Timing signals preserved: last pixel should have latch
         let last_col = get_mapped_index(TEST_COLS - 1);
-        assert!(fb.frames[0].rows[0].data[last_col].latch());
+        assert!(fb.data.frames[0].rows[0].data[last_col].latch());
     }
 
     #[test]
@@ -1860,9 +1871,9 @@ mod tests {
         );
 
         let idx = get_mapped_index(8);
-        assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
-        assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
-        assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+        assert_eq!(fb.data.frames[0].rows[3].data[idx].blu1(), true);
+        assert_eq!(fb.data.frames[0].rows[3].data[idx].red1(), false);
+        assert_eq!(fb.data.frames[0].rows[3].data[idx].grn1(), false);
     }
 
     #[test]
