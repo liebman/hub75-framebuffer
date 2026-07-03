@@ -795,9 +795,7 @@ impl<
         const FRAME_COUNT: usize,
     > super::FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    fn get_word_size(&self) -> super::WordSize {
-        super::WordSize::Eight
-    }
+    type Word = u8;
 
     fn plane_count(&self) -> usize {
         1
@@ -822,30 +820,6 @@ impl<
 {
     fn size(&self) -> embedded_graphics::prelude::Size {
         embedded_graphics::prelude::Size::new(COLS as u32, ROWS as u32)
-    }
-}
-
-impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > super::FrameBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    fn get_word_size(&self) -> super::WordSize {
-        super::WordSize::Eight
-    }
-
-    fn plane_count(&self) -> usize {
-        1
-    }
-
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        assert!(plane_idx == 0, "latched DmaFrameBuffer has only 1 plane");
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
     }
 }
 

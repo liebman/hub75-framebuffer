@@ -435,6 +435,8 @@ impl<
         FB_COLS,
     >
 {
+    type Word = F::Word;
+
     fn get_word_size(&self) -> WordSize {
         self.0.get_word_size()
     }
@@ -654,7 +656,6 @@ mod tests {
     struct TestFrameBuffer {
         calls: std::cell::RefCell<std::vec::Vec<Call>>,
         buf: [u8; 8],
-        word_size: WordSize,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,11 +666,10 @@ mod tests {
     }
 
     impl TestFrameBuffer {
-        fn new(word_size: WordSize) -> Self {
+        fn new() -> Self {
             Self {
                 calls: std::cell::RefCell::new(std::vec::Vec::new()),
                 buf: [0; 8],
-                word_size,
             }
         }
 
@@ -680,7 +680,7 @@ mod tests {
 
     impl Default for TestFrameBuffer {
         fn default() -> Self {
-            Self::new(WordSize::Eight)
+            Self::new()
         }
     }
 
@@ -705,9 +705,7 @@ mod tests {
     }
 
     impl FrameBuffer for TestFrameBuffer {
-        fn get_word_size(&self) -> WordSize {
-            self.word_size
-        }
+        type Word = u8;
 
         fn plane_count(&self) -> usize {
             1
@@ -757,10 +755,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
 
         let input = [
             Pixel(Point::new(0, 0), Color::RED),
@@ -817,10 +812,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
 
         let p = Point::new(100, 40);
         fb.set_pixel(p, Color::BLUE);
@@ -857,10 +849,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
         fb.erase();
         let calls = fb.0.take_calls();
         assert_eq!(calls, std::vec![Call::Erase]);
@@ -885,10 +874,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
 
         // set_pixel path
         let neg = Point::new(-3, 5);
@@ -927,10 +913,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
 
         let inner_ptr = fb.0.buf.as_ptr();
         let inner_len = fb.0.buf.len();
@@ -959,11 +942,8 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Sixteen),
-            core::marker::PhantomData,
-        );
-        assert_eq!(fb.get_word_size(), WordSize::Sixteen);
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
+        assert_eq!(fb.get_word_size(), WordSize::Eight);
     }
 
     #[test]
@@ -985,10 +965,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
         assert_eq!(fb.get_word_size(), WordSize::Eight);
     }
 
@@ -1036,10 +1013,7 @@ mod tests {
             TILED_ROWS,
             TILED_COLS,
             FB_COLS,
-        >(
-            TestFrameBuffer::new(WordSize::Eight),
-            core::marker::PhantomData,
-        );
+        >(TestFrameBuffer::new(), core::marker::PhantomData);
         fb.set_pixel(Point::new(1, 2), Color::RED);
 
         let calls = fb.0.take_calls();
@@ -1095,7 +1069,7 @@ mod tests {
             FB_COLS,
         >::new();
 
-        // Default constructs inner TestFrameBuffer::default() which uses WordSize::Eight
+        // Default constructs inner TestFrameBuffer::default()
         assert_eq!(fb_default.get_word_size(), WordSize::Eight);
         assert_eq!(fb_new.get_word_size(), WordSize::Eight);
 

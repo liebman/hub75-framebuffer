@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### ⚠️ Breaking
+
+* `FrameBuffer` trait now requires a `Word` associated type (e.g. `type Word = u16;`) instead of manually implementing `get_word_size()`; `get_word_size()` has a default implementation derived from `size_of::<Self::Word>()`
+
+### Added
+
+* feature `tail-closes-latch` will include an extra entry in `plain` and `bitplane/plain` implementations to close the latch at the end of the the buffer (`plain`) and at the end of each plane (`bitplane/plain`)
+
 ## [0.8.1] - 2026-06-27
 
 ### Changed
