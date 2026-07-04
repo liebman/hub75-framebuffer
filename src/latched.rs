@@ -179,6 +179,33 @@ use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 
+#[cfg(feature = "blank-delay-1")]
+const BLANKING_DELAY: usize = 1;
+#[cfg(feature = "blank-delay-2")]
+const BLANKING_DELAY: usize = 2;
+#[cfg(feature = "blank-delay-4")]
+const BLANKING_DELAY: usize = 4;
+#[cfg(feature = "blank-delay-8")]
+const BLANKING_DELAY: usize = 8;
+
+#[cfg(not(any(
+    feature = "blank-delay-1",
+    feature = "blank-delay-2",
+    feature = "blank-delay-4",
+    feature = "blank-delay-8"
+)))]
+const BLANKING_DELAY: usize = 0;
+
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u8 = 0b1000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u8 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u8 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u8 = 0b1000_0000;
+
 bitfield! {
     /// 8-bit word carrying the row-address and timing control signals that are
     /// driven on a HUB75 connector.
@@ -333,14 +360,25 @@ static ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
 
 /// Pre-computed data template for a row with the given number of columns.
 /// This template has the correct OE/LAT bits set for each column position.
+#[cfg_attr(
+    not(any(
+        feature = "blank-delay-1",
+        feature = "blank-delay-2",
+        feature = "blank-delay-4",
+        feature = "blank-delay-8"
+    )),
+    allow(clippy::absurd_extreme_comparisons)
+)]
 const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];
     let mut i = 0;
     while i < COLS {
         let mapped_i = map_index(i);
-        // Set latch to false and output_enable to true for all except last column
-        // Note: Check the logical index (i), not the mapped index (mapped_i)
-        data[mapped_i].0 = if i == COLS - 1 { 0 } else { 0b1000_0000 }; // OE bit
+        data[mapped_i].0 = if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            OE_ACTIVE
+        } else {
+            OE_BLANK
+        };
         i += 1;
     }
     data
@@ -995,16 +1033,15 @@ mod tests {
         for entry in &row.data {
             assert_eq!(entry.latch(), false);
         }
-        // The output enable bits are pre-computed in the data template with ESP32 mapping
-        // taken into account. Since make_data_template checks the logical index (i) not
-        // the mapped index, exactly one entry should have output_enable=false (the one
-        // corresponding to the last logical column)
-        let oe_false_count = row
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = TEST_COLS.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = TEST_COLS - active_count;
+        let oe_blank_count = row
             .data
             .iter()
-            .filter(|entry| !entry.output_enable())
+            .filter(|entry| entry.output_enable() != oe_active)
             .count();
-        assert_eq!(oe_false_count, 1);
+        assert_eq!(oe_blank_count, blank_count);
     }
 
     #[test]
@@ -1652,19 +1689,21 @@ mod tests {
         assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].blu1(), false);
 
         // Verify control bits are still correct
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = TEST_COLS.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = TEST_COLS - active_count;
         for frame in &fb.frames {
             for (addr, row) in frame.rows.iter().enumerate() {
                 // Check address words
                 for address in &row.address {
                     assert_eq!(address.addr() as usize, addr);
                 }
-                // Check OE bits in data - should be exactly one false (for last logical column)
-                let oe_false_count = row
+                let oe_blank_count = row
                     .data
                     .iter()
-                    .filter(|entry| !entry.output_enable())
+                    .filter(|entry| entry.output_enable() != oe_active)
                     .count();
-                assert_eq!(oe_false_count, 1);
+                assert_eq!(oe_blank_count, blank_count);
             }
         }
     }
@@ -1755,22 +1794,26 @@ mod tests {
             assert_eq!(entry.latch(), false);
         }
 
-        // Exactly one entry should have output_enable=false (the last logical column)
-        let oe_false_count = template
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = TEST_COLS.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = TEST_COLS - active_count;
+        let oe_blank_count = template
             .iter()
-            .filter(|entry| !entry.output_enable())
+            .filter(|entry| entry.output_enable() != oe_active)
             .count();
-        assert_eq!(oe_false_count, 1);
+        assert_eq!(oe_blank_count, blank_count);
 
         // Test with a small template size to verify edge cases
         let small_template = make_data_template::<4>();
         assert_eq!(small_template.len(), 4);
 
-        let oe_false_count = small_template
+        let small_active = 4_usize.saturating_sub(2 * BLANKING_DELAY + 1);
+        let small_blank = 4 - small_active;
+        let oe_blank_count = small_template
             .iter()
-            .filter(|entry| !entry.output_enable())
+            .filter(|entry| entry.output_enable() != oe_active)
             .count();
-        assert_eq!(oe_false_count, 1);
+        assert_eq!(oe_blank_count, small_blank);
 
         // Test with single column - but skip this test if ESP32 ordering is enabled
         // because the mapping function assumes at least 4 columns for proper mapping
@@ -1778,7 +1821,7 @@ mod tests {
         {
             let single_template = make_data_template::<1>();
             assert_eq!(single_template.len(), 1);
-            assert_eq!(single_template[0].output_enable(), false); // Single column should have OE=false
+            assert_eq!(single_template[0].output_enable(), !oe_active);
             assert_eq!(single_template[0].latch(), false);
         }
     }
@@ -1904,13 +1947,16 @@ mod tests {
         assert_eq!(fb.frames[0].rows[10].data[mc20].grn1(), false);
 
         // Data entries should still have the same OE pattern and latch should remain false for all
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = TEST_COLS.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = TEST_COLS - active_count;
         let row0 = &fb.frames[0].rows[0];
-        let oe_false_count = row0
+        let oe_blank_count = row0
             .data
             .iter()
-            .filter(|entry| !entry.output_enable())
+            .filter(|entry| entry.output_enable() != oe_active)
             .count();
-        assert_eq!(oe_false_count, 1);
+        assert_eq!(oe_blank_count, blank_count);
         assert!(row0.data.iter().all(|e| !e.latch()));
 
         // Address words should remain precomputed table values
@@ -1936,5 +1982,30 @@ mod tests {
         // Red/Green should be off for BLUE at frame 0
         assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
         assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+    }
+
+    #[test]
+    fn test_blanking_delay() {
+        let mut row: Row<TEST_COLS> = Row::new();
+        row.format(5);
+
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        if BLANKING_DELAY > 0 {
+            let first_blanked_idx = map_index(0);
+            assert_eq!(row.data[first_blanked_idx].output_enable(), !oe_active);
+
+            let first_active_idx = map_index(BLANKING_DELAY);
+            assert_eq!(row.data[first_active_idx].output_enable(), oe_active);
+        }
+
+        let last_active_idx = map_index(TEST_COLS - BLANKING_DELAY - 2);
+        assert_eq!(row.data[last_active_idx].output_enable(), oe_active);
+
+        let blanking_pixel_idx = map_index(TEST_COLS - BLANKING_DELAY - 1);
+        assert_eq!(row.data[blanking_pixel_idx].output_enable(), !oe_active);
+
+        let last_pixel_idx = map_index(TEST_COLS - 1);
+        assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
     }
 }

@@ -77,6 +77,33 @@ use crate::Color;
 use crate::FrameBuffer;
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
+#[cfg(feature = "blank-delay-1")]
+const BLANKING_DELAY: usize = 1;
+#[cfg(feature = "blank-delay-2")]
+const BLANKING_DELAY: usize = 2;
+#[cfg(feature = "blank-delay-4")]
+const BLANKING_DELAY: usize = 4;
+#[cfg(feature = "blank-delay-8")]
+const BLANKING_DELAY: usize = 8;
+
+#[cfg(not(any(
+    feature = "blank-delay-1",
+    feature = "blank-delay-2",
+    feature = "blank-delay-4",
+    feature = "blank-delay-8"
+)))]
+const BLANKING_DELAY: usize = 0;
+
+#[cfg(not(feature = "invert-oe"))]
+const OE_ACTIVE: u8 = 0b1000_0000;
+#[cfg(not(feature = "invert-oe"))]
+const OE_BLANK: u8 = 0;
+
+#[cfg(feature = "invert-oe")]
+const OE_ACTIVE: u8 = 0;
+#[cfg(feature = "invert-oe")]
+const OE_BLANK: u8 = 0b1000_0000;
+
 bitfield! {
     #[derive(Clone, Copy, Default, PartialEq, Eq)]
     #[repr(transparent)]
@@ -165,12 +192,25 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
 
 static ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
 
+#[cfg_attr(
+    not(any(
+        feature = "blank-delay-1",
+        feature = "blank-delay-2",
+        feature = "blank-delay-4",
+        feature = "blank-delay-8"
+    )),
+    allow(clippy::absurd_extreme_comparisons)
+)]
 const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];
     let mut i = 0;
     while i < COLS {
         let mapped_i = map_index(i);
-        data[mapped_i].0 = if i == COLS - 1 { 0 } else { 0b1000_0000 };
+        data[mapped_i].0 = if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
+            OE_ACTIVE
+        } else {
+            OE_BLANK
+        };
         i += 1;
     }
     data
@@ -428,12 +468,15 @@ mod tests {
         assert_eq!(row.address[map_index(1)].addr(), 5);
         assert_eq!(row.address[map_index(2)].addr(), 5);
         assert_eq!(row.address[map_index(3)].0, 0);
-        let oe_false_count = row
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = 8_usize.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = 8 - active_count;
+        let oe_blank_count = row
             .data
             .iter()
-            .filter(|entry| !entry.output_enable())
+            .filter(|entry| entry.output_enable() != oe_active)
             .count();
-        assert_eq!(oe_false_count, 1);
+        assert_eq!(oe_blank_count, blank_count);
     }
 
     #[test]
@@ -580,14 +623,17 @@ mod tests {
         let mut row = Row::<16>::new();
         row.format(9);
 
-        let oe_low_indices: std::vec::Vec<_> = row
+        let oe_active = !cfg!(feature = "invert-oe");
+        let active_count = 16_usize.saturating_sub(2 * BLANKING_DELAY + 1);
+        let blank_count = 16 - active_count;
+        let oe_blank_indices: std::vec::Vec<_> = row
             .data
             .iter()
             .enumerate()
-            .filter_map(|(i, entry)| (!entry.output_enable()).then_some(i))
+            .filter_map(|(i, entry)| (entry.output_enable() != oe_active).then_some(i))
             .collect();
-        assert_eq!(oe_low_indices.len(), 1);
-        assert_eq!(oe_low_indices[0], map_index(15));
+        assert_eq!(oe_blank_indices.len(), blank_count);
+        assert!(oe_blank_indices.contains(&map_index(15)));
     }
 
     #[test]
@@ -641,5 +687,30 @@ mod tests {
             assert_eq!(row[map_index(3)].0, 0);
         }
         assert_eq!(table, ADDR_TABLE);
+    }
+
+    #[test]
+    fn test_blanking_delay() {
+        let mut row = Row::<64>::new();
+        row.format(5);
+
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        if BLANKING_DELAY > 0 {
+            let first_blanked_idx = map_index(0);
+            assert_eq!(row.data[first_blanked_idx].output_enable(), !oe_active);
+
+            let first_active_idx = map_index(BLANKING_DELAY);
+            assert_eq!(row.data[first_active_idx].output_enable(), oe_active);
+        }
+
+        let last_active_idx = map_index(64 - BLANKING_DELAY - 2);
+        assert_eq!(row.data[last_active_idx].output_enable(), oe_active);
+
+        let blanking_pixel_idx = map_index(64 - BLANKING_DELAY - 1);
+        assert_eq!(row.data[blanking_pixel_idx].output_enable(), !oe_active);
+
+        let last_pixel_idx = map_index(63);
+        assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
     }
 }
