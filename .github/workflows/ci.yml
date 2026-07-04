@@ -20,6 +20,8 @@ jobs:
         features:
           - ""  # No features
           - "defmt"
+          - "invert-oe"
+          - "blank-delay-4"
     steps:
       - uses: actions/checkout@v4
       

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+* latched, bitplane/latched: support `invert-oe`, `blank-delay-1`, `blank-delay-2`, `blank-delay-4`, and `blank-delay-8` features to control extra blanking time around row address changes, preventing ghosting artifacts on panels with slower address-line settling
+
 ## [0.9.0] - 2026-07-03
 
 ### ⚠️ Breaking
