@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.9.1] - 2026-07-05
+
 ### Changed
 
 * latched, bitplane/latched: support `invert-oe`, `blank-delay-1`, `blank-delay-2`, `blank-delay-4`, and `blank-delay-8` features to control extra blanking time around row address changes, preventing ghosting artifacts on panels with slower address-line settling
@@ -105,7 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * initial version
 
 <!-- next-url -->
-[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/liebman/hub75-framebuffer/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.7.0...v0.8.0
