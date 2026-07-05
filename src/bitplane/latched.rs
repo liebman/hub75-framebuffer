@@ -181,10 +181,10 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
     let mut tbl = [[Address::new(); 4]; 32];
     let mut addr = 0;
     while addr < 32 {
-        tbl[addr][map_index(0)].0 = 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(1)].0 = 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(2)].0 = addr as u8;
-        tbl[addr][map_index(3)].0 = 0;
+        tbl[addr][map_index(0)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
+        tbl[addr][map_index(1)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
+        tbl[addr][map_index(2)].0 = OE_BLANK | addr as u8;
+        tbl[addr][map_index(3)].0 = OE_BLANK;
         addr += 1;
     }
     tbl
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(row.address[map_index(0)].addr(), 5);
         assert_eq!(row.address[map_index(1)].addr(), 5);
         assert_eq!(row.address[map_index(2)].addr(), 5);
-        assert_eq!(row.address[map_index(3)].0, 0);
+        assert_eq!(row.address[map_index(3)].0, OE_BLANK);
         let oe_active = !cfg!(feature = "invert-oe");
         let active_count = 8_usize.saturating_sub(2 * BLANKING_DELAY + 1);
         let blank_count = 8 - active_count;
@@ -490,7 +490,7 @@ mod tests {
                 assert_eq!(row.address[map_index(0)].addr(), row_idx as u8);
                 assert_eq!(row.address[map_index(1)].addr(), row_idx as u8);
                 assert_eq!(row.address[map_index(2)].addr(), row_idx as u8);
-                assert_eq!(row.address[map_index(3)].0, 0);
+                assert_eq!(row.address[map_index(3)].0, OE_BLANK);
             }
         }
     }
@@ -682,9 +682,9 @@ mod tests {
             // Third clock: latch released, address still driven
             assert!(!row[map_index(2)].latch());
             assert_eq!(row[map_index(2)].addr(), addr);
-            // Fourth clock: clear cycle, all zero
+            // Fourth clock: clear cycle, only OE_BLANK
             assert!(!row[map_index(3)].latch());
-            assert_eq!(row[map_index(3)].0, 0);
+            assert_eq!(row[map_index(3)].0, OE_BLANK);
         }
         assert_eq!(table, ADDR_TABLE);
     }
