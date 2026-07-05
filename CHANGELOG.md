@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
-## [0.9.1] - 2026-07-05
+### Fixed
+
+* latched, bitplane/latched: fixed bug in OE setting in address table created in 0.9.1
+
+## [0.9.1] - 2026-07-05 (YANKED)
 
 ### Changed
 
