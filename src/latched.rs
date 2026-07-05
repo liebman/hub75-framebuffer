@@ -348,7 +348,7 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
             let latch = i != 3;
             let mapped_i = map_index(i);
             let latch_bit = if latch { 1u8 << 6 } else { 0u8 };
-            tbl[addr][mapped_i].0 = latch_bit | addr as u8;
+            tbl[addr][mapped_i].0 = OE_BLANK | latch_bit | addr as u8;
             i += 1;
         }
         addr += 1;
@@ -1842,6 +1842,7 @@ mod tests {
 
                 expected_addresses[mapped_i].set_latch(latch);
                 expected_addresses[mapped_i].set_addr(addr);
+                expected_addresses[mapped_i].0 |= OE_BLANK;
             }
 
             // Compare with table
