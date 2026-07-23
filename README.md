@@ -143,20 +143,28 @@ Skip drawing black pixels for performance boost in UI applications. When
 enabled, calls to `set_pixel()` with `Color::BLACK` return early without
 writing to the framebuffer, assuming the framebuffer was already cleared.
 
-### `blank-delay-1` / `blank-delay-2` / `blank-delay-4` / `blank-delay-8`
+### `lead-blank-1/2/4/8/16` / `trail-blank-1/2/4/8/16`
 
 Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted around
-row address changes in the **plain** framebuffers (`plain` and `bitplane::plain`).
-The blanking delay gives the address lines time to settle before the new row is
-latched and lit, preventing ghosting or "bleeding" artifacts between rows.
+row-address changes. The lead blank controls how many cycles the output is
+blanked *before* the row address is changed, and the trail blank controls
+blanking *after* the row address is changed. Together they give the address lines
+time to settle and prevent ghosting or "bleeding" artifacts caused by the panel
+briefly displaying data on the wrong row during the transition.
 
-| Feature         | Blanking cycles |
-|-----------------|-----------------|
-| *(none)*        | 1 (default)     |
-| `blank-delay-1` | 1              |
-| `blank-delay-2` | 2              |
-| `blank-delay-4` | 4              |
-| `blank-delay-8` | 8              |
+| Feature          | Blanking cycles   | Position               |
+|------------------|-------------------|------------------------|
+| *(none)*         | 1 (0 for latched) | before & after change  |
+| `lead-blank-1`   | 1                 | before address change  |
+| `lead-blank-2`   | 2                 | before address change  |
+| `lead-blank-4`   | 4                 | before address change  |
+| `lead-blank-8`   | 8                 | before address change  |
+| `lead-blank-16`  | 16                | before address change  |
+| `trail-blank-1`  | 1                 | after address change   |
+| `trail-blank-2`  | 2                 | after address change   |
+| `trail-blank-4`  | 4                 | after address change   |
+| `trail-blank-8`  | 8                 | after address change   |
+| `trail-blank-16` | 16                | after address change   |
 
 Higher values reduce ghosting at the cost of slightly less brightness (the LEDs
 are on for less time per scan line). Start with the default and increase only if
@@ -164,11 +172,12 @@ you observe row-transition artifacts on your particular panel hardware.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.9.2", features = ["blank-delay-4"] }
+hub75-framebuffer = { version = "0.9.2", features = ["lead-blank-4", "trail-blank-2"] }
 ```
 
-**Note:** Only one `blank-delay-*` feature should be enabled at a time. If
-multiple are enabled, compile-time cfg conflicts will result.
+**Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
+enabled at a time. If multiple are enabled for the same edge, compile-time cfg
+conflicts will result.
 
 ### `defmt`
 

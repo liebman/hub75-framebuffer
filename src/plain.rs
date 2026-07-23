@@ -140,23 +140,45 @@ use embedded_graphics::prelude::Point;
 use super::Color;
 use super::FrameBuffer;
 
-#[cfg(feature = "blank-delay-1")]
-const BLANKING_DELAY: usize = 1;
-#[cfg(feature = "blank-delay-2")]
-const BLANKING_DELAY: usize = 2;
-#[cfg(feature = "blank-delay-4")]
-const BLANKING_DELAY: usize = 4;
-#[cfg(feature = "blank-delay-8")]
-const BLANKING_DELAY: usize = 8;
+#[cfg(feature = "lead-blank-1")]
+const LEAD_BLANK_DELAY: usize = 1;
+#[cfg(feature = "lead-blank-2")]
+const LEAD_BLANK_DELAY: usize = 2;
+#[cfg(feature = "lead-blank-4")]
+const LEAD_BLANK_DELAY: usize = 4;
+#[cfg(feature = "lead-blank-8")]
+const LEAD_BLANK_DELAY: usize = 8;
+#[cfg(feature = "lead-blank-16")]
+const LEAD_BLANK_DELAY: usize = 16;
 
-// Default to 1 if no blanking delay feature is enabled
 #[cfg(not(any(
-    feature = "blank-delay-1",
-    feature = "blank-delay-2",
-    feature = "blank-delay-4",
-    feature = "blank-delay-8"
+    feature = "lead-blank-1",
+    feature = "lead-blank-2",
+    feature = "lead-blank-4",
+    feature = "lead-blank-8",
+    feature = "lead-blank-16"
 )))]
-const BLANKING_DELAY: usize = 1;
+const LEAD_BLANK_DELAY: usize = 1;
+
+#[cfg(feature = "trail-blank-1")]
+const TRAIL_BLANK_DELAY: usize = 1;
+#[cfg(feature = "trail-blank-2")]
+const TRAIL_BLANK_DELAY: usize = 2;
+#[cfg(feature = "trail-blank-4")]
+const TRAIL_BLANK_DELAY: usize = 4;
+#[cfg(feature = "trail-blank-8")]
+const TRAIL_BLANK_DELAY: usize = 8;
+#[cfg(feature = "trail-blank-16")]
+const TRAIL_BLANK_DELAY: usize = 16;
+
+#[cfg(not(any(
+    feature = "trail-blank-1",
+    feature = "trail-blank-2",
+    feature = "trail-blank-4",
+    feature = "trail-blank-8",
+    feature = "trail-blank-16"
+)))]
+const TRAIL_BLANK_DELAY: usize = 1;
 
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u16 = 0b1_0000_0000;
@@ -184,8 +206,8 @@ const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entr
             // last pixel is a latch and new address
             entry.0 |= 0b0010_0000; // latch
             entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
-        } else if i >= BLANKING_DELAY && i < COLS - BLANKING_DELAY - 1 {
-            // active after blanking delay at the start and before blanking delay at the end
+        } else if i >= TRAIL_BLANK_DELAY && i < COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
+            // active after trail blank delay and before lead blank delay
             entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
@@ -1038,7 +1060,9 @@ mod tests {
                 _ => {
                     assert_eq!(entry.addr(), prev_addr as u16);
                     assert_eq!(entry.latch(), false);
-                    if logical_i >= BLANKING_DELAY && logical_i < TEST_COLS - BLANKING_DELAY - 1 {
+                    if logical_i >= TRAIL_BLANK_DELAY
+                        && logical_i < TEST_COLS - LEAD_BLANK_DELAY - 1
+                    {
                         assert_eq!(entry.output_enable(), oe_active);
                     } else {
                         assert_eq!(entry.output_enable(), !oe_active);
@@ -1703,11 +1727,19 @@ mod tests {
 
         let oe_active = !cfg!(feature = "invert-oe");
 
-        let blanking_pixel_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
-        assert_eq!(row.data[blanking_pixel_idx].output_enable(), !oe_active);
+        // Trail blank: indices 0..TRAIL_BLANK_DELAY-1 (DMA start = physical right edge)
+        let trail_blank_idx = get_mapped_index(TRAIL_BLANK_DELAY - 1);
+        assert_eq!(row.data[trail_blank_idx].output_enable(), !oe_active);
 
-        let before_blanking_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 2);
-        assert_eq!(row.data[before_blanking_idx].output_enable(), oe_active);
+        let after_trail_idx = get_mapped_index(TRAIL_BLANK_DELAY);
+        assert_eq!(row.data[after_trail_idx].output_enable(), oe_active);
+
+        // Lead blank: indices before latch (DMA end = physical left edge)
+        let before_lead_idx = get_mapped_index(TEST_COLS - LEAD_BLANK_DELAY - 2);
+        assert_eq!(row.data[before_lead_idx].output_enable(), oe_active);
+
+        let lead_blank_idx = get_mapped_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+        assert_eq!(row.data[lead_blank_idx].output_enable(), !oe_active);
     }
 
     #[test]
@@ -1891,8 +1923,8 @@ mod tests {
         let mut row = Row::<TEST_COLS>::new();
         row.format(5, 4);
 
-        let active_idx = get_mapped_index(BLANKING_DELAY);
-        let blank_idx = get_mapped_index(TEST_COLS - BLANKING_DELAY - 1);
+        let active_idx = get_mapped_index(TRAIL_BLANK_DELAY);
+        let blank_idx = get_mapped_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
         let latch_idx = get_mapped_index(TEST_COLS - 1);
 
         if cfg!(feature = "invert-oe") {
