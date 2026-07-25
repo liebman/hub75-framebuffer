@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.10.0] - 2026-07-25
+
 ### ⚠️ Breaking
 
 * Renamed blank delay features from `blank-delay-1/2/4/8` to separate `lead-blank-1/2/4/8/16` and `trail-blank-1/2/4/8/16` features. The lead blank delay controls how many clock cycles the output is blanked before the row address is changed, and the trail blank delay controls blanking after the row address is changed. The new `16` value is also available. Default is 1 for plain framebuffers and 0 for latched framebuffers (which handle timing via extra `Address` entries to manage the address change).
@@ -117,7 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * initial version
 
 <!-- next-url -->
-[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.8.1...v0.9.0
