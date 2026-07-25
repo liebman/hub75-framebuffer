@@ -21,7 +21,8 @@ jobs:
           - ""  # No features
           - "defmt"
           - "invert-oe"
-          - "blank-delay-4"
+          - "lead-blank-4,trail-blank-16"
+          - "lead-blank-16,trail-blank-4"
     steps:
       - uses: actions/checkout@v4
       

@@ -127,6 +127,44 @@
 //! hub75-framebuffer = { version = "0.9.2", features = ["tail-closes-latch"] }
 //! ```
 //!
+//! ### Blanking delay features (`lead-blank-*` / `trail-blank-*`)
+//!
+//! Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted
+//! around row-address changes. The lead blank controls how many cycles the
+//! output is blanked *before* the row address is changed, and the trail blank
+//! controls blanking *after* the row address is changed. Together they give
+//! the address lines time to settle and prevent ghosting or "bleeding"
+//! artifacts caused by the panel briefly displaying data on the wrong row
+//! during the transition.
+//!
+//! | Feature          | Blanking cycles | Position              |
+//! |------------------|-----------------|-----------------------|
+//! | *(none)*         | 1 (default)     | before & after change |
+//! | `lead-blank-1`   | 1               | before address change |
+//! | `lead-blank-2`   | 2               | before address change |
+//! | `lead-blank-4`   | 4               | before address change |
+//! | `lead-blank-8`   | 8               | before address change |
+//! | `lead-blank-16`  | 16              | before address change |
+//! | `trail-blank-1`  | 1               | after address change  |
+//! | `trail-blank-2`  | 2               | after address change  |
+//! | `trail-blank-4`  | 4               | after address change  |
+//! | `trail-blank-8`  | 8               | after address change  |
+//! | `trail-blank-16` | 16              | after address change  |
+//!
+//! Higher values reduce ghosting at the cost of slightly less brightness (the
+//! LEDs are on for less time per scan line). Start with the default and increase
+//! only if you observe row-transition artifacts on your particular panel
+//! hardware.
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.9.2", features = ["lead-blank-4", "trail-blank-2"] }
+//! ```
+//!
+//! **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
+//! enabled at a time. If multiple are enabled for the same edge, compile-time cfg
+//! conflicts will result.
+//!
 //! ### `defmt` Feature
 //! Implements `defmt::Format` for framebuffer types so they can be emitted with
 //! the `defmt` logging framework. No functional changes; purely adds a trait impl.
