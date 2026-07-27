@@ -219,6 +219,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 0;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u8 = 0b1000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -345,6 +361,7 @@ impl Entry {
 struct Row<const COLS: usize> {
     data: [Entry; COLS],
     address: [Address; 4],
+    gap: [Entry; INTER_ROW_BLANK],
 }
 
 // bytes are output in the order 2, 3, 0, 1
@@ -405,6 +422,7 @@ impl<const COLS: usize> Row<COLS> {
         Self {
             address: [Address::new(); 4],
             data: [Entry::new(); COLS],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
@@ -416,6 +434,12 @@ impl<const COLS: usize> Row<COLS> {
         // Use pre-computed data template - create it each time since we can't use generics in static
         let data_template = make_data_template::<COLS>();
         self.data.copy_from_slice(&data_template);
+
+        // Fill inter-row gap with OE blank
+        // The address is held by the external latch, so just blank the output.
+        for entry in &mut self.gap {
+            entry.0 = OE_BLANK;
+        }
     }
 
     /// Fast clear that only zeros the color bits, preserving OE/LAT control bits

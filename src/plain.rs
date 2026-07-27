@@ -180,6 +180,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 1;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u16 = 0b1_0000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -312,6 +328,7 @@ impl Entry {
 #[repr(C)]
 struct Row<const COLS: usize> {
     data: [Entry; COLS],
+    gap: [Entry; INTER_ROW_BLANK],
 }
 
 const fn map_index(i: usize) -> usize {
@@ -335,6 +352,7 @@ impl<const COLS: usize> Row<COLS> {
     pub const fn new() -> Self {
         Self {
             data: [Entry::new(); COLS],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
@@ -342,6 +360,13 @@ impl<const COLS: usize> Row<COLS> {
         // Use pre-computed template and bulk copy for maximum performance
         let template = make_data_template::<COLS>(addr, prev_addr);
         self.data.copy_from_slice(&template);
+
+        // Fill inter-row gap with new address + OE blank
+        // The gap immediately follows the latch pixel, so the address
+        // lines have time to settle before the next row's active pixels.
+        for entry in &mut self.gap {
+            entry.0 = (addr as u16) | OE_BLANK;
+        }
     }
 
     /// Fast clear method that preserves timing/control bits while clearing pixel data.

@@ -117,6 +117,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 0;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u8 = 0b1000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -186,6 +202,7 @@ impl Entry {
 pub struct Row<const COLS: usize> {
     pub(crate) data: [Entry; COLS],
     pub(crate) address: [Address; 4],
+    pub(crate) gap: [Entry; INTER_ROW_BLANK],
 }
 
 #[inline]
@@ -242,6 +259,7 @@ impl<const COLS: usize> Row<COLS> {
         Self {
             data: [Entry::new(); COLS],
             address: [Address::new(); 4],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
@@ -263,6 +281,11 @@ impl<const COLS: usize> Row<COLS> {
         while i < COLS {
             self.data[i] = data_template[i];
             i += 1;
+        }
+
+        // Fill inter-row gap with OE blank
+        for entry in &mut self.gap {
+            entry.0 = OE_BLANK;
         }
     }
 }

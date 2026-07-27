@@ -165,6 +165,32 @@
 //! enabled at a time. If multiple are enabled for the same edge, compile-time cfg
 //! conflicts will result.
 //!
+//! ### Inter-row blanking features (`inter-row-blank-*`)
+//!
+//! Insert additional dead clock cycles after the latch/address-change at the
+//! end of each row. These gap entries carry the new row address with `OE` HIGH
+//! (blank) and are invisible to all drawing primitives — they only appear in
+//! the DMA stream. Intended for panels with slower row-driver settling times
+//! that need a longer hold-off after a row address change before pixel data
+//! begins clocking in.
+//!
+//! | Feature              | Gap cycles | RAM cost per row       |
+//! |----------------------|------------|------------------------|
+//! | *(none)*             | 0          | 0 bytes                |
+//! | `inter-row-blank-4`  | 4          | 8 bytes (16-bit) / 4 bytes (8-bit) |
+//! | `inter-row-blank-8`  | 8          | 16 bytes / 8 bytes     |
+//! | `inter-row-blank-16` | 16         | 32 bytes / 16 bytes    |
+//! | `inter-row-blank-32` | 32         | 64 bytes / 32 bytes    |
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.10.0", features = ["inter-row-blank-8"] }
+//! ```
+//!
+//! **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
+//! These are independent of the `lead-blank-*` / `trail-blank-*` features and
+//! can be combined with them.
+//!
 //! ### `defmt` Feature
 //! Implements `defmt::Format` for framebuffer types so they can be emitted with
 //! the `defmt` logging framework. No functional changes; purely adds a trait impl.

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+* `inter-row-blank-4`, `inter-row-blank-8`, `inter-row-blank-16`, and `inter-row-blank-32` features that insert additional dead clock cycles after the latch/address-change at the end of each row. These gap entries carry the new row address with `OE` blank and are invisible to all drawing primitives. Intended for panels with slower row-driver settling times that need a longer post-latch hold-off before pixel data begins clocking in.
+
 ## [0.10.0] - 2026-07-25
 
 ### ⚠️ Breaking

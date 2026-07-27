@@ -23,6 +23,7 @@ jobs:
           - "invert-oe"
           - "lead-blank-4,trail-blank-16"
           - "lead-blank-16,trail-blank-4"
+          - "inter-row-blank-8"
     steps:
       - uses: actions/checkout@v4
       
