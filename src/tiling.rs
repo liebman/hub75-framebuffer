@@ -249,7 +249,6 @@ impl<const PANEL_ROWS: usize, const PANEL_COLS: usize> PixelRemapper
     since = "0.11.0",
     note = "use RemappedFrameBuffer<F, M> instead -- it works with all framebuffer types and has a simpler signature"
 )]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(core::fmt::Debug)]
 pub struct TiledFrameBuffer<
     F,
@@ -538,6 +537,38 @@ impl<
 {
 }
 
+#[cfg(feature = "defmt")]
+#[allow(deprecated)]
+impl<
+        F: defmt::Format,
+        M: PixelRemapper,
+        const PANEL_ROWS: usize,
+        const PANEL_COLS: usize,
+        const NROWS: usize,
+        const BITS: u8,
+        const FRAME_COUNT: usize,
+        const TILE_ROWS: usize,
+        const TILE_COLS: usize,
+        const FB_COLS: usize,
+    > defmt::Format
+    for TiledFrameBuffer<
+        F,
+        M,
+        PANEL_ROWS,
+        PANEL_COLS,
+        NROWS,
+        BITS,
+        FRAME_COUNT,
+        TILE_ROWS,
+        TILE_COLS,
+        FB_COLS,
+    >
+{
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "TiledFrameBuffer({:?})", self.0);
+    }
+}
+
 /// Coordinate-remapping wrapper for any framebuffer
 ///
 /// This is a generic wrapper around any framebuffer implementation that remaps
@@ -823,6 +854,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiling_framebuffer_canvas_size() {
         use crate::plain::DmaFrameBuffer;
         use crate::tiling::{compute_tiled_cols, ChainTopRightDown, TiledFrameBuffer};
@@ -941,6 +973,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_draw_iter_forwards_with_remap() {
         const TILED_COLS: usize = 3;
         const TILED_ROWS: usize = 3;
@@ -998,6 +1031,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_set_pixel_remaps_and_forwards() {
         const TILED_COLS: usize = 3;
         const TILED_ROWS: usize = 3;
@@ -1035,6 +1069,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_erase_forwards() {
         const TILED_COLS: usize = 2;
         const TILED_ROWS: usize = 2;
@@ -1060,6 +1095,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_negative_coordinates_not_remapped() {
         const TILED_COLS: usize = 2;
         const TILED_ROWS: usize = 2;
@@ -1099,6 +1135,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_read_buffer_passthrough() {
         const TILED_COLS: usize = 2;
         const TILED_ROWS: usize = 2;
@@ -1128,6 +1165,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_get_word_size_passthrough() {
         const TILED_COLS: usize = 2;
         const TILED_ROWS: usize = 2;
@@ -1151,6 +1189,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_get_word_size_eight_passthrough() {
         const TILED_COLS: usize = 2;
         const TILED_ROWS: usize = 2;
@@ -1199,6 +1238,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_remap_point_truncates_to_u16_range() {
         const TILED_COLS: usize = 1;
         const TILED_ROWS: usize = 1;
@@ -1240,6 +1280,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_default_and_new_construct() {
         const TILED_COLS: usize = 4;
         const TILED_ROWS: usize = 2;
@@ -1288,6 +1329,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_tiled_origin_dimensions_matches_virtual_size() {
         const TILED_COLS: usize = 5;
         const TILED_ROWS: usize = 2;

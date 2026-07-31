@@ -173,12 +173,14 @@
 //!
 //! ### Inter-row blanking features (`inter-row-blank-*`)
 //!
-//! Insert additional dead clock cycles after the latch/address-change at the
-//! end of each row. These gap entries carry the new row address with `OE` HIGH
-//! (blank) and are invisible to all drawing primitives — they only appear in
-//! the DMA stream. Intended for panels with slower row-driver settling times
-//! that need a longer hold-off after a row address change before pixel data
-//! begins clocking in.
+//! Insert additional dead clock cycles at the end of each row. In plain
+//! framebuffers the gap entries hold the previous row address with `OE` HIGH
+//! (blank), deferring the address change to the first pixel of the next row
+//! and giving slow panels more time to finish blanking before the address
+//! lines move. In latched framebuffers the latch and address change are
+//! inseparable in hardware, so the gap simply adds extra blanked cycles after
+//! the address change. The gap entries are invisible to all drawing
+//! primitives — they only appear in the DMA stream.
 //!
 //! | Feature              | Gap cycles | RAM cost per row       |
 //! |----------------------|------------|------------------------|

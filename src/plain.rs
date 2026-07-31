@@ -1087,9 +1087,7 @@ mod tests {
                 assert_eq!(entry.output_enable(), !oe_active);
             } else {
                 assert_eq!(entry.latch(), false);
-                if logical_i >= TRAIL_BLANK_DELAY
-                    && logical_i < TEST_COLS - LEAD_BLANK_DELAY - 1
-                {
+                if logical_i >= TRAIL_BLANK_DELAY && logical_i < TEST_COLS - LEAD_BLANK_DELAY - 1 {
                     assert_eq!(entry.output_enable(), oe_active);
                 } else {
                     assert_eq!(entry.output_enable(), !oe_active);
