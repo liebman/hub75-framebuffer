@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-* `inter-row-blank-4`, `inter-row-blank-8`, `inter-row-blank-16`, and `inter-row-blank-32` features that insert additional dead clock cycles after the latch/address-change at the end of each row. These gap entries carry the new row address with `OE` blank and are invisible to all drawing primitives. Intended for panels with slower row-driver settling times that need a longer post-latch hold-off before pixel data begins clocking in.
+* `inter-row-blank-4`, `inter-row-blank-8`, `inter-row-blank-16`, and `inter-row-blank-32` features that insert additional dead clock cycles between the latch and the address change at the end of each row. In plain framebuffers the gap entries hold the previous row address with `OE` blank, deferring the address change to the first pixel of the next row. Intended for panels with slower row drivers that need more time to finish blanking before the address lines change.
 
 * new() is now const for all framebuffer types
 
