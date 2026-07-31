@@ -356,16 +356,21 @@ impl<const COLS: usize> Row<COLS> {
         }
     }
 
-    pub fn format(&mut self, addr: u8, prev_addr: u8) {
-        // Use pre-computed template and bulk copy for maximum performance
+    pub const fn format(&mut self, addr: u8, prev_addr: u8) {
         let template = make_data_template::<COLS>(addr, prev_addr);
-        self.data.copy_from_slice(&template);
+        let mut i = 0;
+        while i < COLS {
+            self.data[i] = template[i];
+            i += 1;
+        }
 
-        // Fill inter-row gap with new address + OE blank
-        // The gap immediately follows the latch pixel, so the address
-        // lines have time to settle before the next row's active pixels.
-        for entry in &mut self.gap {
-            entry.0 = (addr as u16) | OE_BLANK;
+        let gap_val = (addr as u16) | OE_BLANK;
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = gap_val;
+            i += 1;
         }
     }
 
@@ -409,14 +414,16 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
-    pub fn format(&mut self) {
-        for (addr, row) in self.rows.iter_mut().enumerate() {
+    pub const fn format(&mut self) {
+        let mut addr = 0;
+        while addr < NROWS {
             let prev_addr = if addr == 0 {
                 NROWS as u8 - 1
             } else {
                 addr as u8 - 1
             };
-            row.format(addr as u8, prev_addr);
+            self.rows[addr].format(addr as u8, prev_addr);
+            addr += 1;
         }
     }
 
@@ -555,15 +562,14 @@ impl<
     /// // No need to call format() - framebuffer is ready to use!
     /// ```
     #[must_use]
-    pub fn new() -> Self {
-        debug_assert!(BITS <= 8);
+    pub const fn new() -> Self {
+        assert!(BITS <= 8);
 
         let mut instance = Self {
             _align: 0,
             data: FrameData::new(),
         };
 
-        // Pre-format the framebuffer so it's immediately ready for use
         instance.format();
         instance
     }
@@ -603,9 +609,11 @@ impl<
     /// framebuffer.format(); // Reinitialize if needed
     /// ```
     #[inline]
-    pub fn format(&mut self) {
-        for frame in &mut self.data.frames {
-            frame.format();
+    pub const fn format(&mut self) {
+        let mut i = 0;
+        while i < FRAME_COUNT {
+            self.data.frames[i].format();
+            i += 1;
         }
         #[cfg(feature = "tail-closes-latch")]
         {
@@ -1960,6 +1968,42 @@ mod tests {
             assert!(row.data[active_idx].output_enable());
             assert!(!row.data[blank_idx].output_enable());
             assert!(!row.data[latch_idx].output_enable());
+        }
+    }
+
+    static STATIC_FB: TestFrameBuffer = TestFrameBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestFrameBuffer::new();
+
+        for (fi, frame) in STATIC_FB.data.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.data.frames[fi].rows[ri].data,
+                    "static vs runtime mismatch at frame {fi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.data.frames[fi].rows[ri].gap,
+                    "static vs runtime gap mismatch at frame {fi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestFrameBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (fi, frame) in fb.data.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.data.frames[fi].rows[ri].data,
+                    "re-formatted vs static mismatch at frame {fi}, row {ri}"
+                );
+            }
         }
     }
 }

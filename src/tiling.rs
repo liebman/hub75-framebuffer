@@ -1,10 +1,16 @@
-//! For tiling multiple displays together in various grid arrangements
-//! They have to be tiles together in some specific supported grid layouts.
-//! Currently supported layouts:
-//! - [`ChainTopRightDown`]
+//! Coordinate remapping for tiled and scan-pattern LED panel arrangements
 //!
-//! To write to those panels the [`TiledFrameBuffer`] can be used.
-//! A usage example can be found at that structs documentation.
+//! Use [`RemappedFrameBuffer`] to wrap any framebuffer type (`plain`, `latched`,
+//! `bitplane::plain`, `bitplane::latched`) and remap pixel coordinates through a
+//! [`PixelRemapper`] implementation.
+//!
+//! Available remappers:
+//! - [`ChainTopRightDown`] — tiles multiple panels into a larger virtual display
+//! - [`QuarterScan`] — remaps for 1/16-scan (quarter-scan) 64×64 panels (stub — fill in `remap_xy` for your panel)
+//!
+//! The older [`TiledFrameBuffer`] is still available but deprecated in favour of
+//! [`RemappedFrameBuffer`], which has a simpler generic signature and works with
+//! all framebuffer types.
 
 use core::{convert::Infallible, marker::PhantomData};
 
@@ -146,6 +152,49 @@ impl<
     }
 }
 
+/// Pixel remapper for panels with 1/4-scan (also called 1/16-scan on 64-row panels)
+///
+/// Some LED panels — particularly 64×64 modules — use fewer address lines than
+/// the row count would suggest.  A "1/16-scan" 64×64 panel, for example, has
+/// only 16 row-address lines instead of the expected 32.  The panel internally
+/// maps 4 groups of 16 rows into separate horizontal sections of the shift
+/// register, so the physical framebuffer is 4× wider and 4× shorter than the
+/// logical display.
+///
+/// **Important:** the exact interleaving pattern varies by driver chip and
+/// manufacturer (FM6126, ICN2037, MBI5153, etc.).  The [`remap_xy`] method
+/// must be filled in to match your specific panel.  The default implementation
+/// panics at runtime as a reminder.
+///
+/// # Type Parameters
+///
+/// * `PANEL_ROWS` — Logical row count of the panel (e.g. 64)
+/// * `PANEL_COLS` — Logical column count of the panel (e.g. 64)
+///
+/// # Framebuffer geometry
+///
+/// The underlying framebuffer must be allocated with:
+/// - rows = `PANEL_ROWS / 4`  (e.g. 16 for a 64-row panel)
+/// - cols = `PANEL_COLS * 4`  (e.g. 256 for a 64-column panel)
+///
+/// [`remap_xy`]: PixelRemapper::remap_xy
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(core::fmt::Debug)]
+pub struct QuarterScan<const PANEL_ROWS: usize, const PANEL_COLS: usize> {}
+
+impl<const PANEL_ROWS: usize, const PANEL_COLS: usize> PixelRemapper
+    for QuarterScan<PANEL_ROWS, PANEL_COLS>
+{
+    const VIRT_ROWS: usize = PANEL_ROWS;
+    const VIRT_COLS: usize = PANEL_COLS;
+    const FB_ROWS: usize = PANEL_ROWS / 4;
+    const FB_COLS: usize = PANEL_COLS * 4;
+
+    fn remap_xy(_x: usize, _y: usize) -> (usize, usize) {
+        todo!("implement for your panel's specific row interleaving pattern")
+    }
+}
+
 /// Tile together multiple displays in a certain configuration to form a single larger display
 ///
 /// This is a wrapper around an actual framebuffer implementation which can be used to tile multiple
@@ -196,6 +245,10 @@ impl<
 ///
 /// // Now fb is ready to be used and can be treated like one big canvas (192*96 pixels in this example)
 /// ```
+#[deprecated(
+    since = "0.11.0",
+    note = "use RemappedFrameBuffer<F, M> instead -- it works with all framebuffer types and has a simpler signature"
+)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(core::fmt::Debug)]
 pub struct TiledFrameBuffer<
@@ -211,6 +264,7 @@ pub struct TiledFrameBuffer<
     const FB_COLS: usize,
 >(F, PhantomData<M>);
 
+#[allow(deprecated)]
 impl<
         F: Default,
         M: PixelRemapper,
@@ -245,6 +299,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: Default,
         M: PixelRemapper,
@@ -275,6 +330,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: DrawTarget<Error = Infallible, Color = Color>,
         M: PixelRemapper,
@@ -311,6 +367,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: DrawTarget<Error = Infallible, Color = Color>,
         M: PixelRemapper,
@@ -341,6 +398,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: FrameBufferOperations + FrameBuffer,
         M: PixelRemapper,
@@ -377,6 +435,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 unsafe impl<
         T,
         F: ReadBuffer<Word = T>,
@@ -410,6 +469,7 @@ unsafe impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: FrameBuffer,
         M: PixelRemapper,
@@ -450,6 +510,7 @@ impl<
     }
 }
 
+#[allow(deprecated)]
 impl<
         F: MutableFrameBuffer,
         M: PixelRemapper,
@@ -476,6 +537,149 @@ impl<
     >
 {
 }
+
+/// Coordinate-remapping wrapper for any framebuffer
+///
+/// This is a generic wrapper around any framebuffer implementation that remaps
+/// pixel coordinates before forwarding them to the inner framebuffer. It can be
+/// used for:
+///
+/// - **Tiling** multiple panels into a larger virtual display (see [`ChainTopRightDown`])
+/// - **Scan-pattern remapping** for panels with non-standard row interleaving
+///   (e.g. 1/16 scan on 64×64 panels — see [`QuarterScan`])
+///
+/// Unlike [`TiledFrameBuffer`], this wrapper uses only two type parameters and
+/// works with all four framebuffer types (`plain`, `latched`, `bitplane::plain`,
+/// `bitplane::latched`).
+///
+/// # Type Parameters
+/// - `F` — The underlying framebuffer type
+/// - `M` — The pixel remapping strategy (see implementors of [`PixelRemapper`])
+///
+/// # Example with tiled plain framebuffer
+/// ```rust
+/// use hub75_framebuffer::{compute_frame_count, compute_rows};
+/// use hub75_framebuffer::plain::DmaFrameBuffer;
+/// use hub75_framebuffer::tiling::{RemappedFrameBuffer, ChainTopRightDown, compute_tiled_cols};
+///
+/// const TILED_COLS: usize = 3;
+/// const TILED_ROWS: usize = 3;
+/// const ROWS: usize = 32;
+/// const PANEL_COLS: usize = 64;
+/// const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+/// const BITS: u8 = 2;
+/// const NROWS: usize = compute_rows(ROWS);
+/// const FRAME_COUNT: usize = compute_frame_count(BITS);
+///
+/// type FBType = DmaFrameBuffer<ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>;
+/// type Remapper = ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>;
+/// type Display = RemappedFrameBuffer<FBType, Remapper>;
+///
+/// let mut fb = Display::new();
+/// // fb is a 192×96 virtual canvas
+/// ```
+///
+/// # Example with tiled bitplane framebuffer
+/// ```rust
+/// use hub75_framebuffer::bitplane::plain::DmaFrameBuffer;
+/// use hub75_framebuffer::tiling::{RemappedFrameBuffer, ChainTopRightDown, compute_tiled_cols};
+///
+/// const TILED_COLS: usize = 3;
+/// const TILED_ROWS: usize = 3;
+/// const ROWS: usize = 32;
+/// const NROWS: usize = ROWS / 2;
+/// const PANEL_COLS: usize = 64;
+/// const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+/// const PLANES: usize = 8;
+///
+/// type FBType = DmaFrameBuffer<NROWS, FB_COLS, PLANES>;
+/// type Remapper = ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>;
+/// type Display = RemappedFrameBuffer<FBType, Remapper>;
+///
+/// let mut fb = Display::new();
+/// // fb is a 192×96 virtual canvas backed by a bitplane framebuffer
+/// ```
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(core::fmt::Debug)]
+pub struct RemappedFrameBuffer<F, M: PixelRemapper>(F, PhantomData<M>);
+
+impl<F: Default, M: PixelRemapper> RemappedFrameBuffer<F, M> {
+    /// Create a new remapped framebuffer that takes ownership of a
+    /// default-constructed inner framebuffer and remaps any pixel writes
+    /// through the given [`PixelRemapper`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self(F::default(), PhantomData)
+    }
+}
+
+impl<F: Default, M: PixelRemapper> Default for RemappedFrameBuffer<F, M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<F: DrawTarget<Error = Infallible, Color = Color>, M: PixelRemapper> DrawTarget
+    for RemappedFrameBuffer<F, M>
+{
+    type Color = Color;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
+    {
+        self.0.draw_iter(pixels.into_iter().map(M::remap))
+    }
+}
+
+impl<F: DrawTarget<Error = Infallible, Color = Color>, M: PixelRemapper> OriginDimensions
+    for RemappedFrameBuffer<F, M>
+{
+    fn size(&self) -> Size {
+        Size::new(M::virtual_size().1 as u32, M::virtual_size().0 as u32)
+    }
+}
+
+impl<F: FrameBufferOperations + FrameBuffer, M: PixelRemapper> FrameBufferOperations
+    for RemappedFrameBuffer<F, M>
+{
+    #[inline]
+    fn erase(&mut self) {
+        self.0.erase();
+    }
+
+    #[inline]
+    fn set_pixel(&mut self, p: Point, color: Color) {
+        self.0.set_pixel(M::remap_point(p), color);
+    }
+}
+
+unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for RemappedFrameBuffer<F, M> {
+    type Word = T;
+
+    unsafe fn read_buffer(&self) -> (*const T, usize) {
+        self.0.read_buffer()
+    }
+}
+
+impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M> {
+    type Word = F::Word;
+
+    fn get_word_size(&self) -> WordSize {
+        self.0.get_word_size()
+    }
+
+    fn plane_count(&self) -> usize {
+        self.0.plane_count()
+    }
+
+    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+        self.0.plane_ptr_len(plane_idx)
+    }
+}
+
+impl<F: MutableFrameBuffer, M: PixelRemapper> MutableFrameBuffer for RemappedFrameBuffer<F, M> {}
 
 #[cfg(test)]
 mod tests {
@@ -1184,5 +1388,248 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- RemappedFrameBuffer tests ----
+
+    type TestRemapped = RemappedFrameBuffer<TestFrameBuffer, ChainTopRightDown<32, 64, 3, 3>>;
+
+    #[test]
+    fn test_remapped_default_and_new_construct() {
+        let _fb = TestRemapped::new();
+        let _fb2: TestRemapped = Default::default();
+    }
+
+    #[test]
+    fn test_remapped_origin_dimensions_matches_virtual_size() {
+        let fb = TestRemapped::new();
+        assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    #[test]
+    fn test_remapped_draw_iter_forwards_with_remap() {
+        let mut fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 3, 3>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+
+        let input = [
+            Pixel(Point::new(0, 0), Color::RED),
+            Pixel(Point::new(63, 0), Color::GREEN),
+            Pixel(Point::new(64, 0), Color::BLUE),
+            Pixel(Point::new(100, 40), Color::WHITE),
+        ];
+
+        fb.draw_iter(input.into_iter()).unwrap();
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            Call::Draw(v) => {
+                let expected = [
+                    ChainTopRightDown::<32, 64, 3, 3>::remap(Pixel(Point::new(0, 0), Color::RED)),
+                    ChainTopRightDown::<32, 64, 3, 3>::remap(Pixel(
+                        Point::new(63, 0),
+                        Color::GREEN,
+                    )),
+                    ChainTopRightDown::<32, 64, 3, 3>::remap(Pixel(Point::new(64, 0), Color::BLUE)),
+                    ChainTopRightDown::<32, 64, 3, 3>::remap(Pixel(
+                        Point::new(100, 40),
+                        Color::WHITE,
+                    )),
+                ];
+                let expected_points: std::vec::Vec<(Point, Color)> =
+                    expected.iter().map(|p| (p.0, p.1)).collect();
+                assert_eq!(v.as_slice(), expected_points.as_slice());
+            }
+            _ => panic!("expected a Draw call"),
+        }
+    }
+
+    #[test]
+    fn test_remapped_set_pixel_remaps_and_forwards() {
+        let mut fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 3, 3>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+
+        let p = Point::new(100, 40);
+        fb.set_pixel(p, Color::BLUE);
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 1);
+        match calls.into_iter().next().unwrap() {
+            Call::SetPixel { p: rp, color } => {
+                let expected = ChainTopRightDown::<32, 64, 3, 3>::remap_point(p);
+                assert_eq!(rp, expected);
+                assert_eq!(color, Color::BLUE);
+            }
+            _ => panic!("expected a SetPixel call"),
+        }
+    }
+
+    #[test]
+    fn test_remapped_erase_forwards() {
+        let mut fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+
+        fb.erase();
+        let calls = fb.0.take_calls();
+        assert_eq!(calls, std::vec![Call::Erase]);
+    }
+
+    #[test]
+    fn test_remapped_negative_coordinates_not_remapped() {
+        let mut fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+
+        let neg = Point::new(-3, 5);
+        fb.set_pixel(neg, Color::GREEN);
+        fb.draw_iter(core::iter::once(Pixel(Point::new(10, -2), Color::RED)))
+            .unwrap();
+
+        let calls = fb.0.take_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(matches!(calls[0], Call::SetPixel { p, .. } if p == neg));
+        match &calls[1] {
+            Call::Draw(v) => {
+                assert_eq!(v.as_slice(), &[(Point::new(10, -2), Color::RED)]);
+            }
+            _ => panic!("expected a Draw call"),
+        }
+    }
+
+    #[test]
+    fn test_remapped_read_buffer_passthrough() {
+        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+
+        let inner_ptr = fb.0.buf.as_ptr();
+        let inner_len = fb.0.buf.len();
+
+        let (ptr, len) = unsafe { fb.read_buffer() };
+        assert_eq!(ptr, inner_ptr);
+        assert_eq!(len, inner_len);
+    }
+
+    #[test]
+    fn test_remapped_get_word_size_passthrough() {
+        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+        assert_eq!(fb.get_word_size(), WordSize::Eight);
+    }
+
+    #[test]
+    fn test_remapped_plane_count_passthrough() {
+        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
+            TestFrameBuffer::new(),
+            core::marker::PhantomData,
+        );
+        assert_eq!(fb.plane_count(), 1);
+    }
+
+    #[test]
+    fn test_remapped_with_plain_framebuffer() {
+        use crate::plain::DmaFrameBuffer;
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+        const BITS: u8 = 2;
+        const NROWS: usize = crate::compute_rows(ROWS);
+        const FRAME_COUNT: usize = crate::compute_frame_count(BITS);
+
+        type FBType = DmaFrameBuffer<ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>;
+        type Display = RemappedFrameBuffer<
+            FBType,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+        >;
+
+        let fb = Display::new();
+        assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    #[test]
+    fn test_remapped_with_latched_framebuffer() {
+        use crate::latched::DmaFrameBuffer;
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+        const BITS: u8 = 2;
+        const NROWS: usize = crate::compute_rows(ROWS);
+        const FRAME_COUNT: usize = crate::compute_frame_count(BITS);
+
+        type FBType = DmaFrameBuffer<ROWS, FB_COLS, NROWS, BITS, FRAME_COUNT>;
+        type Display = RemappedFrameBuffer<
+            FBType,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+        >;
+
+        let fb = Display::new();
+        assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    #[test]
+    fn test_remapped_with_bitplane_plain_framebuffer() {
+        use crate::bitplane::plain::DmaFrameBuffer;
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const NROWS: usize = ROWS / 2;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+        const PLANES: usize = 8;
+
+        type FBType = DmaFrameBuffer<NROWS, FB_COLS, PLANES>;
+        type Display = RemappedFrameBuffer<
+            FBType,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+        >;
+
+        let fb = Display::new();
+        assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    #[test]
+    fn test_remapped_with_bitplane_latched_framebuffer() {
+        use crate::bitplane::latched::DmaFrameBuffer;
+        const TILED_COLS: usize = 3;
+        const TILED_ROWS: usize = 3;
+        const ROWS: usize = 32;
+        const NROWS: usize = ROWS / 2;
+        const PANEL_COLS: usize = 64;
+        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
+        const PLANES: usize = 8;
+
+        type FBType = DmaFrameBuffer<NROWS, FB_COLS, PLANES>;
+        type Display = RemappedFrameBuffer<
+            FBType,
+            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
+        >;
+
+        let fb = Display::new();
+        assert_eq!(fb.size(), Size::new(192, 96));
+    }
+
+    #[test]
+    fn test_quarter_scan_associated_constants() {
+        type QS = QuarterScan<64, 64>;
+        assert_eq!(QS::VIRT_ROWS, 64);
+        assert_eq!(QS::VIRT_COLS, 64);
+        assert_eq!(QS::FB_ROWS, 16);
+        assert_eq!(QS::FB_COLS, 256);
+        assert_eq!(QS::virtual_size(), (64, 64));
+        assert_eq!(QS::fb_size(), (16, 256));
     }
 }

@@ -71,13 +71,19 @@
 //! `embedded-graphics` via the `DrawTarget` trait, and expose per-plane
 //! pointers for DMA setup through the [`FrameBuffer`] trait.
 //!
-//! ## Multiple Panels
-//! Use [`tiling::TiledFrameBuffer`] to drive several HUB75 panels as one large
-//! virtual display. Combine it with a pixel-remapping policy such as
-//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above.
+//! ## Multiple Panels / Scan-Pattern Remapping
+//! Use [`tiling::RemappedFrameBuffer`] to drive several HUB75 panels as one
+//! large virtual display, or to remap pixels for non-standard scan patterns
+//! (e.g. 1/16-scan on 64×64 panels). It works with all four framebuffer types
+//! and only requires two generic parameters (`F` and `M`).
+//!
+//! Combine it with a [`tiling::PixelRemapper`] implementation such as
+//! [`tiling::ChainTopRightDown`] (tiling) or [`tiling::QuarterScan`] (1/16-scan).
 //! The wrapper exposes a single `embedded-graphics` canvas, so for example a
 //! 3 × 3 stack of 64 × 32 panels simply looks like a 192 × 96 screen while
 //! all coordinate translation happens transparently.
+//!
+//! The older [`tiling::TiledFrameBuffer`] is still available but deprecated.
 //!
 //! ## Available Feature Flags
 //!

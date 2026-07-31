@@ -230,7 +230,7 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
     tbl
 }
 
-static ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
+const ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
 
 #[allow(clippy::absurd_extreme_comparisons)]
 const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
@@ -267,10 +267,14 @@ impl<const COLS: usize> Row<COLS> {
     ///
     /// This sets the trailing address bytes and initializes output-enable/latch
     /// bits in the pixel stream template.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `addr` is out of range for the address lookup table.
     #[inline]
-    pub fn format(&mut self, addr: u8) {
-        debug_assert!((addr as usize) < ADDR_TABLE.len());
-        let src_addr = &ADDR_TABLE[addr as usize];
+    pub const fn format(&mut self, addr: u8) {
+        assert!((addr as usize) < ADDR_TABLE.len());
+        let src_addr = ADDR_TABLE[addr as usize];
         self.address[0] = src_addr[0];
         self.address[1] = src_addr[1];
         self.address[2] = src_addr[2];
@@ -283,9 +287,12 @@ impl<const COLS: usize> Row<COLS> {
             i += 1;
         }
 
-        // Fill inter-row gap with OE blank
-        for entry in &mut self.gap {
-            entry.0 = OE_BLANK;
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = OE_BLANK;
+            i += 1;
         }
     }
 }
@@ -308,7 +315,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 {
     /// Creates a new frame buffer.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut instance = Self {
             planes: [[Row::new(); NROWS]; PLANES],
         };
@@ -328,13 +335,23 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         NROWS * core::mem::size_of::<Row<COLS>>()
     }
 
+    /// Returns the number of rows per plane for row-based BCM.
+    #[must_use]
+    pub const fn bcm_row_count() -> usize {
+        NROWS
+    }
+
     /// Formats the frame buffer with row addresses and control bits.
     #[inline]
-    pub fn format(&mut self) {
-        for plane in &mut self.planes {
-            for (row_idx, row) in plane.iter_mut().enumerate() {
-                row.format(row_idx as u8);
+    pub const fn format(&mut self) {
+        let mut p = 0;
+        while p < PLANES {
+            let mut row_idx = 0;
+            while row_idx < NROWS {
+                self.planes[p][row_idx].format(row_idx as u8);
+                row_idx += 1;
             }
+            p += 1;
         }
     }
 
@@ -755,5 +772,45 @@ mod tests {
 
         let last_pixel_idx = map_index(63);
         assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
+    }
+
+    static STATIC_FB: TestBuffer = TestBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestBuffer::new();
+
+        for (pi, plane) in STATIC_FB.planes.iter().enumerate() {
+            for (ri, row) in plane.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.planes[pi][ri].data,
+                    "static vs runtime data mismatch at plane {pi}, row {ri}"
+                );
+                assert_eq!(
+                    row.address, runtime_fb.planes[pi][ri].address,
+                    "static vs runtime address mismatch at plane {pi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.planes[pi][ri].gap,
+                    "static vs runtime gap mismatch at plane {pi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (pi, plane) in fb.planes.iter().enumerate() {
+            for (ri, row) in plane.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.planes[pi][ri].data,
+                    "re-formatted vs static mismatch at plane {pi}, row {ri}"
+                );
+            }
+        }
     }
 }

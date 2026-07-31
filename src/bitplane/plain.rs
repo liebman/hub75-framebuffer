@@ -258,13 +258,21 @@ impl<const COLS: usize> Row<COLS> {
     /// Sets up blanking delay, output-enable, latch, and address bits in the
     /// pixel stream template.
     #[inline]
-    pub fn format(&mut self, addr: u8, prev_addr: u8) {
+    pub const fn format(&mut self, addr: u8, prev_addr: u8) {
         let template = make_data_template::<COLS>(addr, prev_addr);
-        self.data.copy_from_slice(&template);
+        let mut i = 0;
+        while i < COLS {
+            self.data[i] = template[i];
+            i += 1;
+        }
 
-        // Fill inter-row gap with new address + OE blank
-        for entry in &mut self.gap {
-            entry.0 = (addr as u16) | OE_BLANK;
+        let gap_val = (addr as u16) | OE_BLANK;
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = gap_val;
+            i += 1;
         }
     }
 }
@@ -315,7 +323,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 {
     /// Creates a new frame buffer, pre-formatted and ready for use.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut instance = Self {
             planes: [PlaneData::new(); PLANES],
         };
@@ -337,24 +345,28 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Formats the frame buffer with row addresses and control bits.
     #[inline]
-    pub fn format(&mut self) {
-        for plane in &mut self.planes {
-            for (row_idx, row) in plane.rows.iter_mut().enumerate() {
+    pub const fn format(&mut self) {
+        let mut p = 0;
+        while p < PLANES {
+            let mut row_idx = 0;
+            while row_idx < NROWS {
                 let prev_addr = if row_idx == 0 {
                     NROWS as u8 - 1
                 } else {
                     row_idx as u8 - 1
                 };
-                row.format(row_idx as u8, prev_addr);
+                self.planes[p].rows[row_idx].format(row_idx as u8, prev_addr);
+                row_idx += 1;
             }
             #[cfg(feature = "tail-closes-latch")]
             {
-                plane.tail.0 = 0x1f | OE_BLANK;
+                self.planes[p].tail.0 = 0x1f | OE_BLANK;
             }
             #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
             {
-                plane.padding.0 = 0x1f | OE_BLANK;
+                self.planes[p].padding.0 = 0x1f | OE_BLANK;
             }
+            p += 1;
         }
     }
 
@@ -769,6 +781,42 @@ mod tests {
             assert!(row.data[active_idx].output_enable());
             assert!(!row.data[blank_idx].output_enable());
             assert!(!row.data[latch_idx].output_enable());
+        }
+    }
+
+    static STATIC_FB: TestBuffer = TestBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestBuffer::new();
+
+        for (pi, plane) in STATIC_FB.planes.iter().enumerate() {
+            for (ri, row) in plane.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.planes[pi].rows[ri].data,
+                    "static vs runtime mismatch at plane {pi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.planes[pi].rows[ri].gap,
+                    "static vs runtime gap mismatch at plane {pi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (pi, plane) in fb.planes.iter().enumerate() {
+            for (ri, row) in plane.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.planes[pi].rows[ri].data,
+                    "re-formatted vs static mismatch at plane {pi}, row {ri}"
+                );
+            }
         }
     }
 }
