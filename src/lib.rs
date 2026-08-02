@@ -99,7 +99,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.10.0", features = ["skip-black-pixels"] }
+//! hub75-framebuffer = { version = "0.11.0", features = ["skip-black-pixels"] }
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
@@ -111,7 +111,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.10.0", features = ["esp32-ordering"] }
+//! hub75-framebuffer = { version = "0.11.0", features = ["esp32-ordering"] }
 //! ```
 //!
 //! ### `tail-closes-latch` Feature (plain framebuffers only)
@@ -130,7 +130,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.10.0", features = ["tail-closes-latch"] }
+//! hub75-framebuffer = { version = "0.11.0", features = ["tail-closes-latch"] }
 //! ```
 //!
 //! ### Blanking delay features (`lead-blank-*` / `trail-blank-*`)
@@ -164,7 +164,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.10.0", features = ["lead-blank-4", "trail-blank-2"] }
+//! hub75-framebuffer = { version = "0.11.0", features = ["lead-blank-4", "trail-blank-2"] }
 //! ```
 //!
 //! **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
@@ -192,7 +192,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.10.0", features = ["inter-row-blank-8"] }
+//! hub75-framebuffer = { version = "0.11.0", features = ["inter-row-blank-8"] }
 //! ```
 //!
 //! **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.

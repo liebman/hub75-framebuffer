@@ -68,7 +68,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = "0.10.0"
+hub75-framebuffer = "0.11.0"
 ```
 
 ### Choose your parameters
@@ -122,7 +122,7 @@ to `esp-hal::dma`. If you're targeting ESP32 devices with `esp-hal`, you
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.10.0", features = ["esp-hal-dma"] }
+hub75-framebuffer = { version = "0.11.0", features = ["esp-hal-dma"] }
 ```
 
 ### `esp32-ordering` (required for original ESP32 only)
@@ -134,7 +134,7 @@ ESP32 variants (S2, S3, C3, etc.) do **not** need this feature.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.10.0", features = ["esp32-ordering"] }
+hub75-framebuffer = { version = "0.11.0", features = ["esp32-ordering"] }
 ```
 
 ### `skip-black-pixels`
@@ -172,7 +172,7 @@ you observe row-transition artifacts on your particular panel hardware.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.10.0", features = ["lead-blank-4", "trail-blank-2"] }
+hub75-framebuffer = { version = "0.11.0", features = ["lead-blank-4", "trail-blank-2"] }
 ```
 
 **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
@@ -198,7 +198,7 @@ hardware, so the gap simply adds extra blanked cycles after the address change.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.10.0", features = ["inter-row-blank-8"] }
+hub75-framebuffer = { version = "0.11.0", features = ["inter-row-blank-8"] }
 ```
 
 **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
@@ -219,7 +219,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.10.0", 
+hub75-framebuffer = { version = "0.11.0", 
                       features = ["esp-hal-dma", "esp32-ordering"] }
 ```
 

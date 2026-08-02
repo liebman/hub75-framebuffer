@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.11.0] - 2026-08-02
+
 ### Added
 
 * `inter-row-blank-4`, `inter-row-blank-8`, `inter-row-blank-16`, and `inter-row-blank-32` features that insert additional dead clock cycles between the latch and the address change at the end of each row. In plain framebuffers the gap entries hold the previous row address with `OE` blank, deferring the address change to the first pixel of the next row. Intended for panels with slower row drivers that need more time to finish blanking before the address lines change.
@@ -129,7 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * initial version
 
 <!-- next-url -->
-[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.0...v0.9.1
