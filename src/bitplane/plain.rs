@@ -119,6 +119,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 1;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u16 = 0b1_0000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -142,21 +158,17 @@ const fn map_index(i: usize) -> usize {
 }
 
 #[inline]
-const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entry; COLS] {
+const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];
     let mut i = 0;
 
     while i < COLS {
         let mut entry = Entry::new();
-        // start with blanking
-        entry.0 = prev_addr as u16 | OE_BLANK;
+        entry.0 = addr as u16 | OE_BLANK;
 
         if i == COLS - 1 {
-            // last pixel is a latch and new address
             entry.0 |= 0b0010_0000; // latch
-            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
         } else if i >= TRAIL_BLANK_DELAY && i < COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
-            // active after trail blank delay and before lead blank delay
             entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
@@ -222,6 +234,7 @@ impl Entry {
 /// 16-bit `Entry` words -- no separate address bytes are needed.
 pub struct Row<const COLS: usize> {
     pub(crate) data: [Entry; COLS],
+    pub(crate) gap: [Entry; INTER_ROW_BLANK],
 }
 
 impl<const COLS: usize> Row<COLS> {
@@ -232,6 +245,7 @@ impl<const COLS: usize> Row<COLS> {
     pub const fn new() -> Self {
         Self {
             data: [Entry::new(); COLS],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
@@ -240,9 +254,22 @@ impl<const COLS: usize> Row<COLS> {
     /// Sets up blanking delay, output-enable, latch, and address bits in the
     /// pixel stream template.
     #[inline]
-    pub fn format(&mut self, addr: u8, prev_addr: u8) {
-        let template = make_data_template::<COLS>(addr, prev_addr);
-        self.data.copy_from_slice(&template);
+    pub const fn format(&mut self, prev_addr: u8) {
+        let template = make_data_template::<COLS>(prev_addr);
+        let mut i = 0;
+        while i < COLS {
+            self.data[i] = template[i];
+            i += 1;
+        }
+
+        let gap_val = (prev_addr as u16) | OE_BLANK;
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = gap_val;
+            i += 1;
+        }
     }
 }
 
@@ -292,7 +319,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 {
     /// Creates a new frame buffer, pre-formatted and ready for use.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut instance = Self {
             planes: [PlaneData::new(); PLANES],
         };
@@ -314,24 +341,28 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Formats the frame buffer with row addresses and control bits.
     #[inline]
-    pub fn format(&mut self) {
-        for plane in &mut self.planes {
-            for (row_idx, row) in plane.rows.iter_mut().enumerate() {
+    pub const fn format(&mut self) {
+        let mut p = 0;
+        while p < PLANES {
+            let mut row_idx = 0;
+            while row_idx < NROWS {
                 let prev_addr = if row_idx == 0 {
                     NROWS as u8 - 1
                 } else {
                     row_idx as u8 - 1
                 };
-                row.format(row_idx as u8, prev_addr);
+                self.planes[p].rows[row_idx].format(prev_addr);
+                row_idx += 1;
             }
             #[cfg(feature = "tail-closes-latch")]
             {
-                plane.tail.0 = 0x1f | OE_BLANK;
+                self.planes[p].tail.0 = 0x1f | OE_BLANK;
             }
             #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
             {
-                plane.padding.0 = 0x1f | OE_BLANK;
+                self.planes[p].padding.0 = 0x1f | OE_BLANK;
             }
+            p += 1;
         }
     }
 
@@ -498,11 +529,11 @@ mod tests {
     #[test]
     fn row_format_sets_address_and_control_bits() {
         let mut row = Row::<TEST_COLS>::new();
-        row.format(5, 4);
+        row.format(4);
 
         let last_idx = map_index(TEST_COLS - 1);
         assert_eq!(row.data[last_idx].latch(), true);
-        assert_eq!(row.data[last_idx].addr(), 5);
+        assert_eq!(row.data[last_idx].addr(), 4);
 
         let first_idx = map_index(0);
         assert_eq!(row.data[first_idx].addr(), 4);
@@ -516,10 +547,11 @@ mod tests {
 
         for plane_idx in 0..8 {
             for row_idx in 0..16 {
+                let prev_addr = if row_idx == 0 { 15 } else { row_idx - 1 };
                 let last_col = map_index(63);
                 assert_eq!(
                     fb.planes[plane_idx].rows[row_idx].data[last_col].addr(),
-                    row_idx as u16
+                    prev_addr as u16
                 );
                 assert_eq!(
                     fb.planes[plane_idx].rows[row_idx].data[last_col].latch(),
@@ -658,7 +690,7 @@ mod tests {
     #[test]
     fn row_format_sets_expected_blank_and_latch_positions() {
         let mut row = Row::<TEST_COLS>::new();
-        row.format(5, 4);
+        row.format(4);
 
         let oe_active = !cfg!(feature = "invert-oe");
 
@@ -671,10 +703,10 @@ mod tests {
         let idx_blank = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
         assert_eq!(row.data[idx_blank].output_enable(), !oe_active);
 
-        // i == COLS - 1 latches and switches to new address
+        // i == COLS - 1 latches, address stays at prev_addr
         let idx_last = map_index(TEST_COLS - 1);
         assert!(row.data[idx_last].latch());
-        assert_eq!(row.data[idx_last].addr(), 5);
+        assert_eq!(row.data[idx_last].addr(), 4);
     }
 
     #[test]
@@ -732,7 +764,7 @@ mod tests {
     #[test]
     fn make_data_template_oe_polarity() {
         let mut row = Row::<TEST_COLS>::new();
-        row.format(5, 4);
+        row.format(4);
 
         let active_idx = map_index(TRAIL_BLANK_DELAY);
         let blank_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
@@ -746,6 +778,42 @@ mod tests {
             assert!(row.data[active_idx].output_enable());
             assert!(!row.data[blank_idx].output_enable());
             assert!(!row.data[latch_idx].output_enable());
+        }
+    }
+
+    static STATIC_FB: TestBuffer = TestBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestBuffer::new();
+
+        for (pi, plane) in STATIC_FB.planes.iter().enumerate() {
+            for (ri, row) in plane.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.planes[pi].rows[ri].data,
+                    "static vs runtime mismatch at plane {pi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.planes[pi].rows[ri].gap,
+                    "static vs runtime gap mismatch at plane {pi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (pi, plane) in fb.planes.iter().enumerate() {
+            for (ri, row) in plane.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.planes[pi].rows[ri].data,
+                    "re-formatted vs static mismatch at plane {pi}, row {ri}"
+                );
+            }
         }
     }
 }

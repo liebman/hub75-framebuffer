@@ -219,6 +219,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 0;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u8 = 0b1000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -345,6 +361,7 @@ impl Entry {
 struct Row<const COLS: usize> {
     data: [Entry; COLS],
     address: [Address; 4],
+    gap: [Entry; INTER_ROW_BLANK],
 }
 
 // bytes are output in the order 2, 3, 0, 1
@@ -379,7 +396,7 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
     tbl
 }
 
-static ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
+const ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
 
 /// Pre-computed data template for a row with the given number of columns.
 /// This template has the correct OE/LAT bits set for each column position.
@@ -405,17 +422,33 @@ impl<const COLS: usize> Row<COLS> {
         Self {
             address: [Address::new(); 4],
             data: [Entry::new(); COLS],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
     #[inline]
-    pub fn format(&mut self, addr: u8) {
-        // Use pre-computed address table
-        self.address.copy_from_slice(&ADDR_TABLE[addr as usize]);
+    pub const fn format(&mut self, addr: u8) {
+        let src_addr = ADDR_TABLE[addr as usize];
+        let mut i = 0;
+        while i < 4 {
+            self.address[i] = src_addr[i];
+            i += 1;
+        }
 
-        // Use pre-computed data template - create it each time since we can't use generics in static
         let data_template = make_data_template::<COLS>();
-        self.data.copy_from_slice(&data_template);
+        let mut i = 0;
+        while i < COLS {
+            self.data[i] = data_template[i];
+            i += 1;
+        }
+
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = OE_BLANK;
+            i += 1;
+        }
     }
 
     /// Fast clear that only zeros the color bits, preserving OE/LAT control bits
@@ -464,9 +497,11 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
     }
 
     #[inline]
-    pub fn format(&mut self) {
-        for (addr, row) in self.rows.iter_mut().enumerate() {
-            row.format(addr as u8);
+    pub const fn format(&mut self) {
+        let mut addr = 0;
+        while addr < NROWS {
+            self.rows[addr].format(addr as u8);
+            addr += 1;
         }
     }
 
@@ -575,7 +610,7 @@ impl<
     /// // Ready to use immediately
     /// ```
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let mut fb = Self {
             frames: [Frame::new(); FRAME_COUNT],
         };
@@ -613,9 +648,11 @@ impl<
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// // framebuffer.format(); // Not needed - new() already calls this
     /// ```
-    pub fn format(&mut self) {
-        for frame in &mut self.frames {
-            frame.format();
+    pub const fn format(&mut self) {
+        let mut i = 0;
+        while i < FRAME_COUNT {
+            self.frames[i].format();
+            i += 1;
         }
     }
 
@@ -2026,5 +2063,45 @@ mod tests {
 
         let last_pixel_idx = map_index(TEST_COLS - 1);
         assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
+    }
+
+    static STATIC_FB: TestFrameBuffer = TestFrameBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestFrameBuffer::new();
+
+        for (fi, frame) in STATIC_FB.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.frames[fi].rows[ri].data,
+                    "static vs runtime data mismatch at frame {fi}, row {ri}"
+                );
+                assert_eq!(
+                    row.address, runtime_fb.frames[fi].rows[ri].address,
+                    "static vs runtime address mismatch at frame {fi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.frames[fi].rows[ri].gap,
+                    "static vs runtime gap mismatch at frame {fi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestFrameBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (fi, frame) in fb.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.frames[fi].rows[ri].data,
+                    "re-formatted vs static mismatch at frame {fi}, row {ri}"
+                );
+            }
+        }
     }
 }

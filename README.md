@@ -179,6 +179,32 @@ hub75-framebuffer = { version = "0.10.0", features = ["lead-blank-4", "trail-bla
 enabled at a time. If multiple are enabled for the same edge, compile-time cfg
 conflicts will result.
 
+### `inter-row-blank-4/8/16/32`
+
+Insert additional dead clock cycles at the end of each row. In plain
+framebuffers the gap entries hold the previous row address with `OE` HIGH
+(blank), deferring the address change to the first pixel of the next row and
+giving slow panels more time to finish blanking before the address lines move.
+In latched framebuffers the latch and address change are inseparable in
+hardware, so the gap simply adds extra blanked cycles after the address change.
+
+| Feature              | Gap cycles | RAM cost per row                     |
+|----------------------|------------|--------------------------------------|
+| *(none)*             | 0          | 0 bytes                              |
+| `inter-row-blank-4`  | 4          | 8 bytes (16-bit) / 4 bytes (8-bit)   |
+| `inter-row-blank-8`  | 8          | 16 bytes / 8 bytes                   |
+| `inter-row-blank-16` | 16         | 32 bytes / 16 bytes                  |
+| `inter-row-blank-32` | 32         | 64 bytes / 32 bytes                  |
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.10.0", features = ["inter-row-blank-8"] }
+```
+
+**Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
+These are independent of the `lead-blank-*` / `trail-blank-*` features and can
+be combined with them.
+
 ### `defmt`
 
 Implement the `defmt::Format` trait so framebuffer types can be logged with

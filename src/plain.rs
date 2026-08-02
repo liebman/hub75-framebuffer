@@ -180,6 +180,22 @@ const TRAIL_BLANK_DELAY: usize = 16;
 )))]
 const TRAIL_BLANK_DELAY: usize = 1;
 
+#[cfg(feature = "inter-row-blank-4")]
+const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+const INTER_ROW_BLANK: usize = 32;
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+const INTER_ROW_BLANK: usize = 0;
+
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u16 = 0b1_0000_0000;
 #[cfg(not(feature = "invert-oe"))]
@@ -190,24 +206,22 @@ const OE_ACTIVE: u16 = 0;
 #[cfg(feature = "invert-oe")]
 const OE_BLANK: u16 = 0b1_0000_0000;
 
-/// Creates a pre-computed data template for a row with the specified addresses.
+/// Creates a pre-computed data template for a row with the specified address.
 /// This template contains all the timing and control signals but no pixel data.
+/// The address remains constant across all entries (including the latch pixel)
+/// so that the address change is deferred to the first pixel of the next row.
 #[inline]
-const fn make_data_template<const COLS: usize>(addr: u8, prev_addr: u8) -> [Entry; COLS] {
+const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];
     let mut i = 0;
 
     while i < COLS {
         let mut entry = Entry::new();
-        // start with blanking
-        entry.0 = prev_addr as u16 | OE_BLANK;
+        entry.0 = addr as u16 | OE_BLANK;
 
         if i == COLS - 1 {
-            // last pixel is a latch and new address
             entry.0 |= 0b0010_0000; // latch
-            entry.0 = (entry.0 & !0b0001_1111) | (addr as u16); // new address
         } else if i >= TRAIL_BLANK_DELAY && i < COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
-            // active after trail blank delay and before lead blank delay
             entry.0 = (entry.0 & !0b1_0000_0000) | OE_ACTIVE;
         }
 
@@ -312,6 +326,7 @@ impl Entry {
 #[repr(C)]
 struct Row<const COLS: usize> {
     data: [Entry; COLS],
+    gap: [Entry; INTER_ROW_BLANK],
 }
 
 const fn map_index(i: usize) -> usize {
@@ -335,13 +350,26 @@ impl<const COLS: usize> Row<COLS> {
     pub const fn new() -> Self {
         Self {
             data: [Entry::new(); COLS],
+            gap: [Entry::new(); INTER_ROW_BLANK],
         }
     }
 
-    pub fn format(&mut self, addr: u8, prev_addr: u8) {
-        // Use pre-computed template and bulk copy for maximum performance
-        let template = make_data_template::<COLS>(addr, prev_addr);
-        self.data.copy_from_slice(&template);
+    pub const fn format(&mut self, prev_addr: u8) {
+        let template = make_data_template::<COLS>(prev_addr);
+        let mut i = 0;
+        while i < COLS {
+            self.data[i] = template[i];
+            i += 1;
+        }
+
+        let gap_val = (prev_addr as u16) | OE_BLANK;
+        let mut i = 0;
+        // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i].0 = gap_val;
+            i += 1;
+        }
     }
 
     /// Fast clear method that preserves timing/control bits while clearing pixel data.
@@ -384,14 +412,16 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
         }
     }
 
-    pub fn format(&mut self) {
-        for (addr, row) in self.rows.iter_mut().enumerate() {
+    pub const fn format(&mut self) {
+        let mut addr = 0;
+        while addr < NROWS {
             let prev_addr = if addr == 0 {
                 NROWS as u8 - 1
             } else {
                 addr as u8 - 1
             };
-            row.format(addr as u8, prev_addr);
+            self.rows[addr].format(prev_addr);
+            addr += 1;
         }
     }
 
@@ -530,15 +560,14 @@ impl<
     /// // No need to call format() - framebuffer is ready to use!
     /// ```
     #[must_use]
-    pub fn new() -> Self {
-        debug_assert!(BITS <= 8);
+    pub const fn new() -> Self {
+        assert!(BITS <= 8);
 
         let mut instance = Self {
             _align: 0,
             data: FrameData::new(),
         };
 
-        // Pre-format the framebuffer so it's immediately ready for use
         instance.format();
         instance
     }
@@ -578,9 +607,11 @@ impl<
     /// framebuffer.format(); // Reinitialize if needed
     /// ```
     #[inline]
-    pub fn format(&mut self) {
-        for frame in &mut self.data.frames {
-            frame.format();
+    pub const fn format(&mut self) {
+        let mut i = 0;
+        while i < FRAME_COUNT {
+            self.data.frames[i].format();
+            i += 1;
         }
         #[cfg(feature = "tail-closes-latch")]
         {
@@ -1040,33 +1071,26 @@ mod tests {
     #[test]
     fn test_row_format() {
         let mut row: Row<TEST_COLS> = Row::new();
-        let test_addr = 5;
         let prev_addr = 4;
 
-        row.format(test_addr, prev_addr);
+        row.format(prev_addr);
 
         let oe_active = !cfg!(feature = "invert-oe");
 
-        // Check data entries configuration
         for (physical_i, entry) in row.data.iter().enumerate() {
             let logical_i = get_mapped_index(physical_i);
 
-            match logical_i {
-                i if i == TEST_COLS - 1 => {
-                    assert_eq!(entry.latch(), true);
-                    assert_eq!(entry.addr(), test_addr as u16);
+            assert_eq!(entry.addr(), prev_addr as u16);
+
+            if logical_i == TEST_COLS - 1 {
+                assert_eq!(entry.latch(), true);
+                assert_eq!(entry.output_enable(), !oe_active);
+            } else {
+                assert_eq!(entry.latch(), false);
+                if logical_i >= TRAIL_BLANK_DELAY && logical_i < TEST_COLS - LEAD_BLANK_DELAY - 1 {
+                    assert_eq!(entry.output_enable(), oe_active);
+                } else {
                     assert_eq!(entry.output_enable(), !oe_active);
-                }
-                _ => {
-                    assert_eq!(entry.addr(), prev_addr as u16);
-                    assert_eq!(entry.latch(), false);
-                    if logical_i >= TRAIL_BLANK_DELAY
-                        && logical_i < TEST_COLS - LEAD_BLANK_DELAY - 1
-                    {
-                        assert_eq!(entry.output_enable(), oe_active);
-                    } else {
-                        assert_eq!(entry.output_enable(), !oe_active);
-                    }
                 }
             }
         }
@@ -1132,19 +1156,14 @@ mod tests {
 
         frame.format();
 
-        // Check that each row was formatted with correct address parameters
         for addr in 0..TEST_NROWS {
             let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
-
-            // Check some key pixels in each row
             let row = &frame.rows[addr];
 
-            // Check last pixel has correct new address
             let last_pixel_idx = get_mapped_index(TEST_COLS - 1);
-            assert_eq!(row.data[last_pixel_idx].addr(), addr as u16);
+            assert_eq!(row.data[last_pixel_idx].addr(), prev_addr as u16);
             assert_eq!(row.data[last_pixel_idx].latch(), true);
 
-            // Check non-last pixels have previous address
             let first_pixel_idx = get_mapped_index(0);
             assert_eq!(row.data[first_pixel_idx].addr(), prev_addr as u16);
             assert_eq!(row.data[first_pixel_idx].latch(), false);
@@ -1210,20 +1229,15 @@ mod tests {
     fn test_dma_framebuffer_erase() {
         let fb = TestFrameBuffer::new();
 
-        // After erasing, all frames should be formatted
         for frame in &fb.data.frames {
             for addr in 0..TEST_NROWS {
                 let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
-
-                // Check some key pixels in each row
                 let row = &frame.rows[addr];
 
-                // Check last pixel has correct new address
                 let last_pixel_idx = get_mapped_index(TEST_COLS - 1);
-                assert_eq!(row.data[last_pixel_idx].addr(), addr as u16);
+                assert_eq!(row.data[last_pixel_idx].addr(), prev_addr as u16);
                 assert_eq!(row.data[last_pixel_idx].latch(), true);
 
-                // Check non-last pixels have previous address
                 let first_pixel_idx = get_mapped_index(0);
                 assert_eq!(row.data[first_pixel_idx].addr(), prev_addr as u16);
                 assert_eq!(row.data[first_pixel_idx].latch(), false);
@@ -1720,10 +1734,9 @@ mod tests {
     #[test]
     fn test_blanking_delay() {
         let mut row: Row<TEST_COLS> = Row::new();
-        let test_addr = 5;
         let prev_addr = 4;
 
-        row.format(test_addr, prev_addr);
+        row.format(prev_addr);
 
         let oe_active = !cfg!(feature = "invert-oe");
 
@@ -1921,7 +1934,7 @@ mod tests {
     #[test]
     fn test_make_data_template_oe_polarity() {
         let mut row = Row::<TEST_COLS>::new();
-        row.format(5, 4);
+        row.format(4);
 
         let active_idx = get_mapped_index(TRAIL_BLANK_DELAY);
         let blank_idx = get_mapped_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
@@ -1935,6 +1948,42 @@ mod tests {
             assert!(row.data[active_idx].output_enable());
             assert!(!row.data[blank_idx].output_enable());
             assert!(!row.data[latch_idx].output_enable());
+        }
+    }
+
+    static STATIC_FB: TestFrameBuffer = TestFrameBuffer::new();
+
+    #[test]
+    fn test_static_construction_is_formatted() {
+        let runtime_fb = TestFrameBuffer::new();
+
+        for (fi, frame) in STATIC_FB.data.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, runtime_fb.data.frames[fi].rows[ri].data,
+                    "static vs runtime mismatch at frame {fi}, row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.data.frames[fi].rows[ri].gap,
+                    "static vs runtime gap mismatch at frame {fi}, row {ri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_reinitializes_at_runtime() {
+        let mut fb = TestFrameBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (fi, frame) in fb.data.frames.iter().enumerate() {
+            for (ri, row) in frame.rows.iter().enumerate() {
+                assert_eq!(
+                    row.data, STATIC_FB.data.frames[fi].rows[ri].data,
+                    "re-formatted vs static mismatch at frame {fi}, row {ri}"
+                );
+            }
         }
     }
 }

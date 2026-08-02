@@ -71,13 +71,19 @@
 //! `embedded-graphics` via the `DrawTarget` trait, and expose per-plane
 //! pointers for DMA setup through the [`FrameBuffer`] trait.
 //!
-//! ## Multiple Panels
-//! Use [`tiling::TiledFrameBuffer`] to drive several HUB75 panels as one large
-//! virtual display. Combine it with a pixel-remapping policy such as
-//! [`tiling::ChainTopRightDown`] and any of the framebuffer flavours above.
+//! ## Multiple Panels / Scan-Pattern Remapping
+//! Use [`tiling::RemappedFrameBuffer`] to drive several HUB75 panels as one
+//! large virtual display, or to remap pixels for non-standard scan patterns
+//! (e.g. 1/16-scan on 64×64 panels). It works with all four framebuffer types
+//! and only requires two generic parameters (`F` and `M`).
+//!
+//! Combine it with a [`tiling::PixelRemapper`] implementation such as
+//! [`tiling::ChainTopRightDown`] (tiling) or [`tiling::QuarterScan`] (1/16-scan).
 //! The wrapper exposes a single `embedded-graphics` canvas, so for example a
 //! 3 × 3 stack of 64 × 32 panels simply looks like a 192 × 96 screen while
 //! all coordinate translation happens transparently.
+//!
+//! The older [`tiling::TiledFrameBuffer`] is still available but deprecated.
 //!
 //! ## Available Feature Flags
 //!
@@ -164,6 +170,34 @@
 //! **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
 //! enabled at a time. If multiple are enabled for the same edge, compile-time cfg
 //! conflicts will result.
+//!
+//! ### Inter-row blanking features (`inter-row-blank-*`)
+//!
+//! Insert additional dead clock cycles at the end of each row. In plain
+//! framebuffers the gap entries hold the previous row address with `OE` HIGH
+//! (blank), deferring the address change to the first pixel of the next row
+//! and giving slow panels more time to finish blanking before the address
+//! lines move. In latched framebuffers the latch and address change are
+//! inseparable in hardware, so the gap simply adds extra blanked cycles after
+//! the address change. The gap entries are invisible to all drawing
+//! primitives — they only appear in the DMA stream.
+//!
+//! | Feature              | Gap cycles | RAM cost per row       |
+//! |----------------------|------------|------------------------|
+//! | *(none)*             | 0          | 0 bytes                |
+//! | `inter-row-blank-4`  | 4          | 8 bytes (16-bit) / 4 bytes (8-bit) |
+//! | `inter-row-blank-8`  | 8          | 16 bytes / 8 bytes     |
+//! | `inter-row-blank-16` | 16         | 32 bytes / 16 bytes    |
+//! | `inter-row-blank-32` | 32         | 64 bytes / 32 bytes    |
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.10.0", features = ["inter-row-blank-8"] }
+//! ```
+//!
+//! **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
+//! These are independent of the `lead-blank-*` / `trail-blank-*` features and
+//! can be combined with them.
 //!
 //! ### `defmt` Feature
 //! Implements `defmt::Format` for framebuffer types so they can be emitted with
