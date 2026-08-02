@@ -13,7 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * `inter-row-blank-4`, `inter-row-blank-8`, `inter-row-blank-16`, and `inter-row-blank-32` features that insert additional dead clock cycles between the latch and the address change at the end of each row. In plain framebuffers the gap entries hold the previous row address with `OE` blank, deferring the address change to the first pixel of the next row. Intended for panels with slower row drivers that need more time to finish blanking before the address lines change.
 
-* new() is now const for all framebuffer types
+* `new()` is now `const` for all framebuffer types
+
+### ⚠️ Breaking
+
+* Deprecated the `plain` and `latched` `DmaFrameBuffer` implementations in favor of their bitplane counterparts. Users should migrate to `bitplane::plain::DmaFrameBuffer` and `bitplane::latched::DmaFrameBuffer` respectively. Bitplane framebuffers provide the same functionality with linearly-scaling memory usage (vs. exponential for threshold-based framebuffers), true BCM plane access via the `FrameBuffer` trait, and simpler multi-color-depth support by adding or removing planes.
 
 ## [0.10.0] - 2026-07-25
 
