@@ -143,7 +143,7 @@ Skip drawing black pixels for performance boost in UI applications. When
 enabled, calls to `set_pixel()` with `Color::BLACK` return early without
 writing to the framebuffer, assuming the framebuffer was already cleared.
 
-### `lead-blank-1/2/4/8/16` / `trail-blank-1/2/4/8/16`
+### `lead-blank-1/2/4/8/16/32` / `trail-blank-1/2/4/8/16/32`
 
 Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted around
 row-address changes. The lead blank controls how many cycles the output is
@@ -160,11 +160,13 @@ briefly displaying data on the wrong row during the transition.
 | `lead-blank-4`   | 4                 | before address change  |
 | `lead-blank-8`   | 8                 | before address change  |
 | `lead-blank-16`  | 16                | before address change  |
+| `lead-blank-32`  | 32                | before address change  |
 | `trail-blank-1`  | 1                 | after address change   |
 | `trail-blank-2`  | 2                 | after address change   |
 | `trail-blank-4`  | 4                 | after address change   |
 | `trail-blank-8`  | 8                 | after address change   |
 | `trail-blank-16` | 16                | after address change   |
+| `trail-blank-32` | 32                | after address change   |
 
 Higher values reduce ghosting at the cost of slightly less brightness (the LEDs
 are on for less time per scan line). Start with the default and increase only if

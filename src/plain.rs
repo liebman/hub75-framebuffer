@@ -131,14 +131,13 @@
 
 use core::convert::Infallible;
 
-use crate::{FrameBufferOperations, MutableFrameBuffer};
+use crate::{BcmSegment, FrameBuffer, FrameBufferOperations, MutableFrameBuffer};
 use bitfield::bitfield;
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 
 use super::Color;
-use super::FrameBuffer;
 
 #[cfg(feature = "lead-blank-1")]
 const LEAD_BLANK_DELAY: usize = 1;
@@ -150,13 +149,16 @@ const LEAD_BLANK_DELAY: usize = 4;
 const LEAD_BLANK_DELAY: usize = 8;
 #[cfg(feature = "lead-blank-16")]
 const LEAD_BLANK_DELAY: usize = 16;
+#[cfg(feature = "lead-blank-32")]
+const LEAD_BLANK_DELAY: usize = 32;
 
 #[cfg(not(any(
     feature = "lead-blank-1",
     feature = "lead-blank-2",
     feature = "lead-blank-4",
     feature = "lead-blank-8",
-    feature = "lead-blank-16"
+    feature = "lead-blank-16",
+    feature = "lead-blank-32"
 )))]
 const LEAD_BLANK_DELAY: usize = 1;
 
@@ -170,13 +172,16 @@ const TRAIL_BLANK_DELAY: usize = 4;
 const TRAIL_BLANK_DELAY: usize = 8;
 #[cfg(feature = "trail-blank-16")]
 const TRAIL_BLANK_DELAY: usize = 16;
+#[cfg(feature = "trail-blank-32")]
+const TRAIL_BLANK_DELAY: usize = 32;
 
 #[cfg(not(any(
     feature = "trail-blank-1",
     feature = "trail-blank-2",
     feature = "trail-blank-4",
     feature = "trail-blank-8",
-    feature = "trail-blank-16"
+    feature = "trail-blank-16",
+    feature = "trail-blank-32"
 )))]
 const TRAIL_BLANK_DELAY: usize = 1;
 
@@ -587,6 +592,15 @@ impl<
         core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>()
     }
 
+    /// Computes the number of DMA descriptors required for this framebuffer.
+    ///
+    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
+    #[must_use]
+    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
+        let total_bytes = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
+        total_bytes.div_ceil(max_chunk)
+    }
+
     /// Perform full formatting of the framebuffer with timing and control signals.
     ///
     /// This sets up all the timing and control signals needed for proper HUB75 operation.
@@ -877,15 +891,15 @@ impl<
 {
     type Word = u16;
 
-    fn plane_count(&self) -> usize {
+    fn bcm_segment_count(&self) -> usize {
         1
     }
 
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        assert!(plane_idx == 0, "plain DmaFrameBuffer has only 1 plane");
+    fn bcm_segment(&self, index: usize) -> BcmSegment {
+        assert!(index == 0, "threshold DmaFrameBuffer has only 1 segment");
         let ptr = (&raw const self.data).cast::<u8>();
         let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
-        (ptr, len)
+        BcmSegment { ptr, len, reps: 1 }
     }
 }
 
@@ -907,13 +921,16 @@ mod tests {
     use std::vec;
 
     use super::*;
-    use crate::{FrameBuffer, WordSize};
     use embedded_graphics::pixelcolor::RgbColor;
     use embedded_graphics::prelude::*;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle};
 
     const TEST_ROWS: usize = 32;
-    const TEST_COLS: usize = 64;
+    const TEST_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+        128
+    } else {
+        64
+    };
     const TEST_NROWS: usize = TEST_ROWS / 2;
     const TEST_BITS: u8 = 3;
     const TEST_FRAME_COUNT: usize = (1 << TEST_BITS) - 1; // 7 frames for 3-bit depth
@@ -1669,19 +1686,6 @@ mod tests {
     }
 
     #[test]
-    fn test_framebuffer_trait() {
-        let fb = TestFrameBuffer::new();
-        assert_eq!(fb.get_word_size(), WordSize::Sixteen);
-
-        let fb_ref = &fb;
-        assert_eq!(fb_ref.get_word_size(), WordSize::Sixteen);
-
-        let mut fb = TestFrameBuffer::new();
-        let fb_ref = &mut fb;
-        assert_eq!(fb_ref.get_word_size(), WordSize::Sixteen);
-    }
-
-    #[test]
     fn test_debug_formatting() {
         let fb = TestFrameBuffer::new();
         let debug_string = format!("{:?}", fb);
@@ -1985,5 +1989,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bcm_segment_count_is_one() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        assert_eq!(fb.bcm_segment_count(), 1);
+    }
+
+    #[test]
+    fn bcm_segment_covers_entire_buffer() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        let seg = fb.bcm_segment(0);
+        let expected_ptr = (&raw const fb.data).cast::<u8>();
+        let expected_len =
+            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
+        assert_eq!(seg.ptr, expected_ptr);
+        assert_eq!(seg.len, expected_len);
+        assert_eq!(seg.reps, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "only 1 segment")]
+    fn bcm_segment_panics_for_invalid_index() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        let _ = fb.bcm_segment(1);
+    }
+
+    #[test]
+    fn dma_descriptor_count_matches_expected() {
+        let total_bytes =
+            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
+        let max_chunk = 4092;
+        let expected = total_bytes.div_ceil(max_chunk);
+        assert_eq!(TestFrameBuffer::dma_descriptor_count(max_chunk), expected);
     }
 }

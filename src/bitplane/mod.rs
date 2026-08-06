@@ -2,8 +2,15 @@
 //!
 //! These framebuffers store colour data as one bit-plane per colour bit
 //! (typically 8 planes for full 8-bit colour). To render, configure the DMA
-//! descriptor chain to output each plane `2^(7 - plane_index)` times so that
-//! the weighted repetition counts produce correct BCM brightness.
+//! descriptor chain to output each plane a number of times equal to its
+//! bit-weight (the MSB plane 2^7 times, the LSB plane once) so that the
+//! weighted repetition counts produce correct BCM brightness.
+//!
+//! Plane ordering differs by layout: [`plain::frame`] and [`latched`] store
+//! planes **MSB-first** (plane 0 = MSB), while [`plain::row`] stores them
+//! **LSB-first** (plane 0 = LSB). Drivers should follow the
+//! [`FrameBuffer`](crate::FrameBuffer) segment sequence rather than assuming
+//! an order.
 //!
 //! Two variants are provided:
 //!

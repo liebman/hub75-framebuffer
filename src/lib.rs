@@ -68,8 +68,8 @@
 //! with the number of planes.
 //!
 //! All four variants have configurable row and column dimensions, support
-//! `embedded-graphics` via the `DrawTarget` trait, and expose per-plane
-//! pointers for DMA setup through the [`FrameBuffer`] trait.
+//! `embedded-graphics` via the `DrawTarget` trait, and expose their BCM
+//! scan sequence through the [`FrameBuffer`] trait.
 //!
 //! ## Multiple Panels / Scan-Pattern Remapping
 //! Use [`tiling::RemappedFrameBuffer`] to drive several HUB75 panels as one
@@ -265,43 +265,93 @@ pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
 }
 
-/// Trait for read-only framebuffers.
-pub trait FrameBuffer {
-    /// The word type used by this framebuffer.
-    type Word;
-
-    /// Returns the word size configuration for this framebuffer
-    fn get_word_size(&self) -> WordSize {
-        match size_of::<Self::Word>() {
-            1 => WordSize::Eight,
-            2 => WordSize::Sixteen,
-            _ => panic!("Unsupported word size"),
-        }
-    }
-
-    /// Returns the number of BCM bit-planes in this framebuffer.
-    ///
-    /// Contiguous (threshold-based) framebuffers return `1` — the entire
-    /// buffer is treated as a single plane.  True bit-plane framebuffers
-    /// return the number of planes (typically equal to the colour depth in
-    /// bits).
-    fn plane_count(&self) -> usize;
-
-    /// Returns a raw pointer and byte length for the given plane.
-    ///
-    /// For a single-plane framebuffer (`plane_count() == 1`), `plane_idx`
-    /// must be `0` and the returned span covers the whole DMA-ready buffer.
-    ///
-    /// # Panics
-    ///
-    /// May panic if `plane_idx >= plane_count()`.
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize);
+/// A single DMA segment in the BCM scan sequence.
+///
+/// The driver walks an ordered sequence of segments, sending each one `reps`
+/// times, to produce correct BCM brightness weighting without needing to know
+/// the framebuffer's internal memory layout.
+#[derive(Debug, Clone, Copy)]
+pub struct BcmSegment {
+    /// Pointer to DMA-ready data.
+    pub ptr: *const u8,
+    /// Byte length of this segment.
+    pub len: usize,
+    /// BCM repetition count (e.g. 128 for MSB plane, 1 for LSB).
+    pub reps: usize,
 }
 
-/// Trait for mutable framebuffers
+/// Framebuffer that exposes its BCM scan sequence as an ordered series of
+/// DMA segments, organized into groups.
 ///
-/// This trait extends `FrameBuffer` with the ability to draw to the framebuffer
-/// using the `embedded_graphics` drawing primitives.
+/// The driver chains all segments within a group into a single DMA transfer
+/// and fires the ISR only at group boundaries. This allows row-major
+/// framebuffers to batch an entire row's BCM cycle into one transfer,
+/// avoiding per-segment ISR overhead that can starve other tasks.
+///
+/// # Segment Ordering and Grouping
+///
+/// **Frame-major** (bitplane) framebuffers produce `PLANES` segments with
+/// `segments_per_group = 1` (each plane is its own group):
+///
+/// ```text
+/// group 0: (plane0_ptr, plane_bytes, 2^(PLANES-1))
+/// group 1: (plane1_ptr, plane_bytes, 2^(PLANES-2))
+/// …
+/// group N: (planeN_ptr, plane_bytes, 1)
+/// ```
+///
+/// **Row-major** framebuffers produce `NROWS × (PLANES + has_trailer)`
+/// segments with `segments_per_group = PLANES + has_trailer` (one group per
+/// row). Planes are **LSB-first** within each row:
+///
+/// ```text
+/// group 0 (row 0):
+///   (row0_plane0_ptr, pixel_bytes, 1)             // LSB
+///   …
+///   (row0_planeN_ptr, pixel_bytes, 2^(PLANES-1))  // MSB
+///   (row0_trailer_ptr, trailer_bytes, 1)          // gap/tail, if enabled
+/// group 1 (row 1):
+///   (row1_plane0_ptr, pixel_bytes, 1)
+///   …
+/// ```
+///
+/// **Threshold-based** (deprecated) framebuffers produce a single segment
+/// with `reps = 1` covering the entire buffer.
+pub trait FrameBuffer {
+    /// The DMA word type used by this framebuffer (`u8` for latched, `u16`
+    /// for direct-drive). The driver uses this to enforce that pin
+    /// configurations match the framebuffer at compile time.
+    type Word;
+
+    /// Total number of BCM segments in one complete frame scan.
+    fn bcm_segment_count(&self) -> usize;
+
+    /// Returns the i-th BCM segment.
+    ///
+    /// Segments are ordered for correct display: the driver sends
+    /// segment 0 first (repeated `reps` times), then segment 1, etc.
+    ///
+    /// # Panics
+    /// Panics if `index >= bcm_segment_count()`.
+    fn bcm_segment(&self, index: usize) -> BcmSegment;
+
+    /// Number of consecutive segments that form one DMA transfer group.
+    ///
+    /// The driver chains all segments within a group into a single DMA
+    /// descriptor chain and fires the ISR only at group boundaries.
+    /// `bcm_segment_count()` must be divisible by this value.
+    ///
+    /// - **Frame-major** framebuffers return `1` (each plane is its own group).
+    /// - **Row-major** framebuffers return `PLANES + has_gap` (all planes for
+    ///   one row are linked into a single DMA transfer).
+    ///
+    /// Defaults to `1` for backward compatibility.
+    fn bcm_segments_per_group(&self) -> usize {
+        1
+    }
+}
+
+/// Trait for mutable framebuffers that support `embedded_graphics` drawing.
 pub trait MutableFrameBuffer:
     FrameBuffer + DrawTarget<Color = Color, Error = core::convert::Infallible>
 {

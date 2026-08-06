@@ -1,0 +1,1391 @@
+//! Row-major bitplane framebuffer.
+//!
+//! Unlike the plane-major [`super::frame::DmaFrameBuffer`] which stores all
+//! rows for one bit-plane together, this framebuffer groups all bit-planes
+//! for a single row contiguously. This layout is optimized for row-by-row
+//! BCM rendering where the DMA driver replays each plane's pixel data
+//! multiple times (for brightness weighting) before moving to the next row.
+//!
+//! # Memory Layout
+//!
+//! ```text
+//! DmaFrameBuffer<NROWS, COLS, PLANES>
+//! ├── rows: [RowData<COLS, PLANES>; NROWS]
+//! │   └── RowData
+//! │       ├── pixels: [PixelPlane<COLS>; PLANES]
+//! │       │   └── PixelPlane
+//! │       │       └── data: [Entry; COLS]
+//! │       ├── gap: [Entry; INTER_ROW_BLANK]    -- inter-row blanking gap
+//! │       ├── [padding: Entry]                 -- if esp32-ordering + tail-closes-latch
+//! │       └── [tail: Entry]                    -- if tail-closes-latch
+//! ```
+//!
+//! Planes are stored **LSB-first**: plane 0 carries the least-significant
+//! bit and gets 1 DMA repetition; plane `PLANES-1` carries the MSB and
+//! gets `2^(PLANES-1)` repetitions. This ordering means the first plane
+//! after an address change displays stale data for only 1 rep (minimal
+//! visual weight), eliminating the need for a separate primer segment.
+//!
+//! Each plane's pixel row contains COLS entries with a latch at the very
+//! last pixel; the latch entry is always blanked. In steady state the row
+//! address changes at exactly one place — the plane0→plane1 boundary within
+//! a scan row — so blanking (OE HIGH) is applied only around that boundary;
+//! anywhere else would be dead time that only dims the panel:
+//!
+//! - **Plane 0** (LSB, 1 rep): uses `prev_addr`, lead blank at end
+//!   (the address changes to the current row right after this plane).
+//!   No trail blank is needed at its start: the previous row's planes (and
+//!   the gap/tail trailer) all carry the same `prev_addr`, so no address
+//!   change occurs there.
+//! - **Plane 1** (first current-addr plane): trail blank at start
+//!   (address just changed from plane 0's `prev_addr`).
+//! - **Planes 2..PLANES-2** (middle): OE active on all entries except
+//!   latch — no address change, so no blanking needed.
+//! - **Plane PLANES-1** (MSB, most reps): no lead blank — the gap, tail,
+//!   and next row's plane 0 all keep this row's address, so no address
+//!   change follows.
+//! - **PLANES == 1**: the single plane uses `prev_addr` with both trail
+//!   and lead blank, because in that configuration the address does change
+//!   at every row boundary.
+//!
+//! When `tail-closes-latch` is enabled, a single tail word (LATCH=0,
+//! OE=BLANK) is appended at the end of each [`RowData`] — after the gap,
+//! not after every plane. This prevents peripherals that continue clocking
+//! after DMA completion from re-latching stale data.
+//!
+//! The inter-row gap appears only once per scan row (after all planes),
+//! rather than once per plane as in the plane-major layout.
+//!
+//! # DMA Descriptor Pattern
+//!
+//! For each row the driver builds descriptors like:
+//!
+//! ```text
+//! plane 0 (LSB)        × 1 rep             → rows[r].pixels[0]  (prev_addr)
+//! plane 1              × 2 reps            → rows[r].pixels[1]  (addr)
+//! …
+//! plane PLANES-1 (MSB) × 2^(PLANES-1) reps → rows[r].pixels[PLANES-1] (addr)
+//! trailer              × 1                 → rows[r].gap (+ tail if enabled)
+//! ```
+
+use core::convert::Infallible;
+
+use embedded_graphics::pixelcolor::RgbColor;
+use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
+
+use crate::Color;
+use crate::{BcmSegment, FrameBuffer};
+use crate::{FrameBufferOperations, MutableFrameBuffer};
+
+use super::{
+    map_index, Entry, INTER_ROW_BLANK, LEAD_BLANK_DELAY, OE_ACTIVE, OE_BLANK, TRAIL_BLANK_DELAY,
+};
+
+/// One bit-plane's pixel data for a single row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(C)]
+pub struct PixelPlane<const COLS: usize> {
+    pub(crate) data: [Entry; COLS],
+}
+
+impl<const COLS: usize> PixelPlane<COLS> {
+    const fn new() -> Self {
+        Self {
+            data: [Entry::new(); COLS],
+        }
+    }
+}
+
+/// Byte size of the row trailer (gap + optional padding + optional tail).
+const TRAILER_BYTES: usize = {
+    let gap = INTER_ROW_BLANK * core::mem::size_of::<Entry>();
+
+    #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+    let padding = core::mem::size_of::<Entry>();
+    #[cfg(not(all(feature = "esp32-ordering", feature = "tail-closes-latch")))]
+    let padding = 0;
+
+    #[cfg(feature = "tail-closes-latch")]
+    let tail = core::mem::size_of::<Entry>();
+    #[cfg(not(feature = "tail-closes-latch"))]
+    let tail = 0;
+
+    gap + padding + tail
+};
+
+/// Whether this configuration has a non-empty row trailer segment.
+#[allow(clippy::absurd_extreme_comparisons)]
+const HAS_TRAILER: bool = TRAILER_BYTES > 0;
+
+/// Builds a per-plane pixel template for the row-major layout.
+///
+/// - `trail_blank`: if true, first `TRAIL_BLANK_DELAY` entries have OE blanked
+///   (address just changed from the previous row).
+/// - `lead_blank`: if true, last `LEAD_BLANK_DELAY + 1` entries have OE blanked
+///   (address change to next row follows).
+/// - The latch entry (last pixel) always has OE blanked — many HUB75 driver ICs
+///   require OE to be inactive during latch for reliable data transfer.
+#[inline]
+const fn make_row_plane_template<const COLS: usize>(
+    addr: u8,
+    trail_blank: bool,
+    lead_blank: bool,
+) -> [Entry; COLS] {
+    let mut data = [Entry::new(); COLS];
+    let mut i = 0;
+
+    while i < COLS {
+        let is_last = i == COLS - 1;
+
+        let blanked = is_last
+            || (trail_blank && i < TRAIL_BLANK_DELAY)
+            || (lead_blank && i >= COLS.saturating_sub(LEAD_BLANK_DELAY + 1));
+
+        let oe = if blanked { OE_BLANK } else { OE_ACTIVE };
+        let mut val = addr as u16 | oe;
+        if is_last {
+            val |= 0b0010_0000; // latch
+        }
+
+        data[map_index(i)] = Entry::from_raw(val);
+        i += 1;
+    }
+
+    data
+}
+
+/// One scan row's complete data: pixel entries for all bit-planes (LSB-first),
+/// followed by an inter-row blanking gap and optional tail word.
+///
+/// Blanking is applied only around the single address change (the
+/// plane0→plane1 boundary); see the module-level documentation:
+/// - Plane 0 (LSB): `prev_addr`, lead blank (+ trail blank iff `PLANES == 1`)
+/// - Plane 1: current addr, trail blank (address just changed from plane 0)
+/// - Middle and last planes: current addr, OE active everywhere except latch
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(C)]
+pub struct RowData<const COLS: usize, const PLANES: usize> {
+    pub(crate) pixels: [PixelPlane<COLS>; PLANES],
+    pub(crate) gap: [Entry; INTER_ROW_BLANK],
+    #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+    pub(crate) padding: Entry,
+    #[cfg(feature = "tail-closes-latch")]
+    pub(crate) tail: Entry,
+}
+
+impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
+    const fn new() -> Self {
+        Self {
+            pixels: [PixelPlane::new(); PLANES],
+            gap: [Entry::new(); INTER_ROW_BLANK],
+            #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+            padding: Entry::new(),
+            #[cfg(feature = "tail-closes-latch")]
+            tail: Entry::new(),
+        }
+    }
+
+    /// Format control signals for this row.
+    ///
+    /// - `prev_addr`: previous row address (used by plane 0 / LSB).
+    /// - `addr`: current row address (used by planes 1+ and trailer).
+    const fn format(&mut self, prev_addr: u8, addr: u8) {
+        let mut p = 0;
+        while p < PLANES {
+            let is_first = p == 0;
+
+            if is_first {
+                // Plane 0 (LSB, 1 rep): uses prev_addr, lead blank.
+                // With a single plane the address changes at every row
+                // boundary (entries alternate prev_addr), so a trail blank
+                // is needed as well to let the address settle while blanked.
+                let template = make_row_plane_template::<COLS>(prev_addr, PLANES == 1, true);
+                let mut c = 0;
+                while c < COLS {
+                    self.pixels[p].data[c] = template[c];
+                    c += 1;
+                }
+            } else {
+                // Planes 1+ use current addr.
+                // Plane 1: trail blank (address just changed from prev_addr).
+                let trail = p == 1;
+                let template = make_row_plane_template::<COLS>(addr, trail, false);
+                let mut c = 0;
+                while c < COLS {
+                    self.pixels[p].data[c] = template[c];
+                    c += 1;
+                }
+            }
+
+            p += 1;
+        }
+
+        let gap_entry = Entry::from_raw(addr as u16 | OE_BLANK);
+        let mut i = 0;
+        #[allow(clippy::absurd_extreme_comparisons)]
+        while i < INTER_ROW_BLANK {
+            self.gap[i] = gap_entry;
+            i += 1;
+        }
+
+        #[cfg(feature = "tail-closes-latch")]
+        {
+            self.tail = Entry::from_raw(addr as u16 | OE_BLANK);
+        }
+        #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
+        {
+            self.padding = Entry::from_raw(addr as u16 | OE_BLANK);
+        }
+    }
+}
+
+/// Row-major BCM framebuffer for row-by-row Binary Code Modulation.
+///
+/// See the [module-level documentation](self) for layout details and DMA
+/// descriptor patterns.
+///
+/// # Type Parameters
+/// - `NROWS`: number of multiplexed row pairs (panel height / 2)
+/// - `COLS`: number of columns (panel width)
+/// - `PLANES`: number of bit-planes (typically 8 for full 8-bit colour)
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct DmaFrameBuffer<const NROWS: usize, const COLS: usize, const PLANES: usize> {
+    pub(crate) rows: [RowData<COLS, PLANES>; NROWS],
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
+    DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    /// Creates a new framebuffer, pre-formatted and ready for use.
+    ///
+    /// # Panics
+    /// Panics if `NROWS` is not within `1..=32` (5-bit row address) or
+    /// `PLANES` is not within `1..=8` (8-bit color depth). In const contexts
+    /// (e.g. `static` framebuffers) this is a compile-time error.
+    #[must_use]
+    pub const fn new() -> Self {
+        assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
+        assert!(PLANES >= 1 && PLANES <= 8, "PLANES must be within 1..=8");
+        let mut instance = Self {
+            rows: [RowData::new(); NROWS],
+        };
+        instance.format();
+        instance
+    }
+
+    /// Number of bit-planes (for DMA descriptor count calculation).
+    #[must_use]
+    pub const fn bcm_chunk_count() -> usize {
+        PLANES
+    }
+
+    /// Byte size of one plane's pixel row.
+    #[must_use]
+    pub const fn bcm_chunk_bytes() -> usize {
+        COLS * core::mem::size_of::<Entry>()
+    }
+
+    /// Number of multiplexed scan rows.
+    #[must_use]
+    pub const fn bcm_row_count() -> usize {
+        NROWS
+    }
+
+    /// Byte size of the row trailer (gap + optional tail).
+    #[must_use]
+    pub const fn bcm_row_bytes() -> usize {
+        TRAILER_BYTES
+    }
+
+    /// Computes the number of DMA descriptors required for this framebuffer.
+    ///
+    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
+    #[must_use]
+    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
+        let pixel_bytes = COLS * core::mem::size_of::<Entry>();
+        let descs_per_pixel = pixel_bytes.div_ceil(max_chunk);
+        #[allow(clippy::absurd_extreme_comparisons)]
+        let descs_per_trailer = if TRAILER_BYTES > 0 {
+            TRAILER_BYTES.div_ceil(max_chunk)
+        } else {
+            0
+        };
+        let total_pixel_reps = (1usize << PLANES) - 1;
+        NROWS * (descs_per_pixel * total_pixel_reps + descs_per_trailer)
+    }
+
+    /// Formats the framebuffer with row addresses and control bits.
+    ///
+    /// Plane 0 (LSB, 1 rep) uses `prev_addr` so the brief display of
+    /// stale data from the previous row has minimal visual weight.
+    /// Planes 1+ use the current row address. Blanking is applied only
+    /// around the plane0→plane1 address change (plus plane 0's trail
+    /// blank when `PLANES == 1`); see the module-level documentation for
+    /// the exact distribution.
+    #[inline]
+    pub const fn format(&mut self) {
+        let mut r = 0;
+        while r < NROWS {
+            let prev_addr = if r == 0 { NROWS - 1 } else { r - 1 } as u8;
+            let addr = r as u8;
+            self.rows[r].format(prev_addr, addr);
+            r += 1;
+        }
+    }
+
+    /// Erase pixel colours while preserving row control data.
+    #[inline]
+    pub fn erase(&mut self) {
+        const MASK: u16 = !0b0111_1110_0000_0000; // clear bits 9-14
+        for row in &mut self.rows {
+            for plane in &mut row.pixels {
+                for entry in &mut plane.data {
+                    entry.mask_raw(MASK);
+                }
+            }
+        }
+    }
+
+    /// Set a pixel in the framebuffer.
+    #[inline]
+    pub fn set_pixel(&mut self, p: Point, color: Color) {
+        if p.x < 0 || p.y < 0 {
+            return;
+        }
+        self.set_pixel_internal(p.x as usize, p.y as usize, color);
+    }
+
+    #[inline]
+    fn set_pixel_internal(&mut self, x: usize, y: usize, color: Color) {
+        if x >= COLS || y >= NROWS * 2 {
+            return;
+        }
+
+        // Early exit for black pixels - common in UI backgrounds
+        // Only enabled when skip-black-pixels feature is active
+        #[cfg(feature = "skip-black-pixels")]
+        if color == Color::BLACK {
+            return;
+        }
+
+        let row_idx = if y < NROWS { y } else { y - NROWS };
+        let is_top = y < NROWS;
+        let red = color.r();
+        let green = color.g();
+        let blue = color.b();
+
+        for plane_idx in 0..PLANES {
+            let bit = (8 - PLANES + plane_idx) as u32;
+            let bits = ((u8::from(((blue >> bit) & 1) != 0)) << 2)
+                | ((u8::from(((green >> bit) & 1) != 0)) << 1)
+                | u8::from(((red >> bit) & 1) != 0);
+            let col_idx = map_index(x);
+            let entry = &mut self.rows[row_idx].pixels[plane_idx].data[col_idx];
+            if is_top {
+                entry.set_color0_bits(bits);
+            } else {
+                entry.set_color1_bits(bits);
+            }
+        }
+    }
+
+    /// Returns a pointer and byte length for a plane's pixel row.
+    ///
+    /// # Panics
+    /// Panics if `row_idx >= NROWS` or `plane_idx >= PLANES`.
+    #[must_use]
+    pub fn pixel_row_ptr_len(&self, row_idx: usize, plane_idx: usize) -> (*const u8, usize) {
+        assert!(
+            row_idx < NROWS,
+            "row_idx {row_idx} out of range for {NROWS} rows"
+        );
+        assert!(
+            plane_idx < PLANES,
+            "plane_idx {plane_idx} out of range for {PLANES} planes"
+        );
+        let ptr = (&raw const self.rows[row_idx].pixels[plane_idx]).cast::<u8>();
+        let len = COLS * core::mem::size_of::<Entry>();
+        (ptr, len)
+    }
+
+    /// Returns a pointer and byte length for a row's trailer (gap + tail).
+    ///
+    /// The trailer covers the inter-row gap entries plus any `tail-closes-latch`
+    /// words. Returns length 0 when neither gap nor tail is present.
+    ///
+    /// # Panics
+    /// Panics if `row_idx >= NROWS`.
+    #[must_use]
+    pub fn trailer_ptr_len(&self, row_idx: usize) -> (*const u8, usize) {
+        assert!(
+            row_idx < NROWS,
+            "row_idx {row_idx} out of range for {NROWS} rows"
+        );
+        let ptr = (&raw const self.rows[row_idx].gap).cast::<u8>();
+        (ptr, TRAILER_BYTES)
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> Default
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> core::fmt::Debug
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DmaFrameBuffer")
+            .field("size", &core::mem::size_of_val(self))
+            .field("row_count", &NROWS)
+            .field("planes", &PLANES)
+            .field("cols", &COLS)
+            .finish()
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> defmt::Format
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "DmaFrameBuffer<{}, {}, {}>", NROWS, COLS, PLANES);
+        defmt::write!(f, " size: {}", core::mem::size_of_val(self));
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    type Word = u16;
+
+    fn bcm_segment_count(&self) -> usize {
+        let trailer = usize::from(HAS_TRAILER);
+        NROWS * (PLANES + trailer)
+    }
+
+    fn bcm_segment(&self, index: usize) -> BcmSegment {
+        let trailer = usize::from(HAS_TRAILER);
+        let segments_per_row = PLANES + trailer;
+        assert!(
+            index < NROWS * segments_per_row,
+            "segment index {index} out of range"
+        );
+        let row_idx = index / segments_per_row;
+        let within_row = index % segments_per_row;
+        if within_row < PLANES {
+            let (ptr, len) = self.pixel_row_ptr_len(row_idx, within_row);
+            let reps = 1usize << within_row;
+            BcmSegment { ptr, len, reps }
+        } else {
+            let (ptr, len) = self.trailer_ptr_len(row_idx);
+            BcmSegment { ptr, len, reps: 1 }
+        }
+    }
+
+    fn bcm_segments_per_group(&self) -> usize {
+        let trailer = usize::from(HAS_TRAILER);
+        PLANES + trailer
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBufferOperations
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    #[inline]
+    fn erase(&mut self) {
+        DmaFrameBuffer::<NROWS, COLS, PLANES>::erase(self);
+    }
+
+    #[inline]
+    fn set_pixel(&mut self, p: Point, color: Color) {
+        DmaFrameBuffer::<NROWS, COLS, PLANES>::set_pixel(self, p, color);
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> MutableFrameBuffer
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> OriginDimensions
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    fn size(&self) -> Size {
+        Size::new(COLS as u32, (NROWS * 2) as u32)
+    }
+}
+
+impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
+    for DmaFrameBuffer<NROWS, COLS, PLANES>
+{
+    type Color = Color;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
+    {
+        for pixel in pixels {
+            self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::super::{LEAD_BLANK_DELAY, OE_ACTIVE, TRAIL_BLANK_DELAY};
+    use super::*;
+    use embedded_graphics::prelude::*;
+    use std::format;
+
+    const TEST_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+        128
+    } else {
+        64
+    };
+    const TEST_PLANES: usize = 8;
+    type TestBuffer = DmaFrameBuffer<16, TEST_COLS, TEST_PLANES>;
+
+    #[test]
+    fn format_sets_addresses_per_plane() {
+        let fb = TestBuffer::new();
+
+        for row_idx in 0..16 {
+            let prev_addr = if row_idx == 0 { 15 } else { row_idx - 1 } as u16;
+
+            // Plane 0 (LSB): prev_addr
+            for col in 0..TEST_COLS {
+                let entry = fb.rows[row_idx].pixels[0].data[col];
+                assert_eq!(
+                    entry.addr(),
+                    prev_addr,
+                    "row {row_idx} plane 0 col {col} should use prev_addr"
+                );
+            }
+
+            // Planes 1+: current addr
+            for plane_idx in 1..TEST_PLANES {
+                for col in 0..TEST_COLS {
+                    let entry = fb.rows[row_idx].pixels[plane_idx].data[col];
+                    assert_eq!(
+                        entry.addr(),
+                        row_idx as u16,
+                        "row {row_idx} plane {plane_idx} col {col} should use current addr"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn planes_match_row_plane_template() {
+        let fb = TestBuffer::new();
+
+        for row_idx in 0..16 {
+            let prev_addr = if row_idx == 0 { 15 } else { row_idx - 1 } as u8;
+            let addr = row_idx as u8;
+
+            // Plane 0 (LSB): prev_addr, lead blank only (no address change
+            // at its start, so no trail blank)
+            let expected = make_row_plane_template::<TEST_COLS>(prev_addr, false, true);
+            assert_eq!(
+                fb.rows[row_idx].pixels[0].data, expected,
+                "row {row_idx} plane 0 doesn't match template"
+            );
+
+            // Planes 1+: current addr, trail blank on plane 1 only, no lead blank
+            for p in 1..TEST_PLANES {
+                let expected = make_row_plane_template::<TEST_COLS>(addr, p == 1, false);
+                assert_eq!(
+                    fb.rows[row_idx].pixels[p].data, expected,
+                    "row {row_idx} plane {p} doesn't match template"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pixel_rows_have_latch_at_last_entry() {
+        let fb = TestBuffer::new();
+
+        for row in &fb.rows {
+            for plane in &row.pixels {
+                let last_idx = map_index(TEST_COLS - 1);
+                assert!(
+                    plane.data[last_idx].latch(),
+                    "last pixel must have latch set"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn first_plane_has_lead_blank_only() {
+        let fb = TestBuffer::new();
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        for row in &fb.rows {
+            let plane = &row.pixels[0];
+
+            // No trail blank: the previous row's planes and trailer all carry
+            // the same prev_addr, so no address change occurs at plane 0's start.
+            let first_idx = map_index(0);
+            assert_eq!(
+                plane.data[first_idx].output_enable(),
+                oe_active,
+                "plane 0: first pixel should have OE active (no trail blank)"
+            );
+
+            let active_idx = map_index(TRAIL_BLANK_DELAY);
+            assert_eq!(
+                plane.data[active_idx].output_enable(),
+                oe_active,
+                "plane 0: pixel after trail blank position should have OE active"
+            );
+
+            let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+            assert_eq!(
+                plane.data[lead_idx].output_enable(),
+                !oe_active,
+                "plane 0: lead blank should have OE blank"
+            );
+
+            let latch_idx = map_index(TEST_COLS - 1);
+            assert_eq!(
+                plane.data[latch_idx].output_enable(),
+                !oe_active,
+                "plane 0: latch should have OE blank"
+            );
+        }
+    }
+
+    #[test]
+    fn last_plane_blanks_only_at_latch() {
+        let fb = TestBuffer::new();
+        let oe_active = !cfg!(feature = "invert-oe");
+        let last = TEST_PLANES - 1;
+
+        for row in &fb.rows {
+            let plane = &row.pixels[last];
+
+            let first_idx = map_index(0);
+            assert_eq!(
+                plane.data[first_idx].output_enable(),
+                oe_active,
+                "last plane: first pixel should have OE active (no trail blank)"
+            );
+
+            // No lead blank: the trailer and the next row's plane 0 keep this
+            // row's address, so no address change follows the MSB plane.
+            let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+            assert_eq!(
+                plane.data[lead_idx].output_enable(),
+                oe_active,
+                "last plane: near-end pixel should have OE active (no lead blank)"
+            );
+
+            let latch_idx = map_index(TEST_COLS - 1);
+            assert_eq!(
+                plane.data[latch_idx].output_enable(),
+                !oe_active,
+                "last plane: latch should have OE blank"
+            );
+        }
+    }
+
+    #[test]
+    fn middle_planes_have_oe_active_except_latch() {
+        let fb = TestBuffer::new();
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        // Middle planes are 2..PLANES-2 (plane 1 has trail blank, last has lead blank)
+        for row in &fb.rows {
+            for plane_idx in 2..TEST_PLANES - 1 {
+                for col in 0..TEST_COLS {
+                    let entry = row.pixels[plane_idx].data[col];
+                    if col == map_index(TEST_COLS - 1) {
+                        assert_eq!(
+                            entry.output_enable(),
+                            !oe_active,
+                            "middle plane {plane_idx}: latch should have OE blank"
+                        );
+                    } else {
+                        assert_eq!(
+                            entry.output_enable(),
+                            oe_active,
+                            "middle plane {plane_idx} col {col} should have OE active"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plane_1_has_trail_blank_only() {
+        let fb = TestBuffer::new();
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        for row in &fb.rows {
+            let plane = &row.pixels[1];
+
+            let trail_idx = map_index(0);
+            assert_eq!(
+                plane.data[trail_idx].output_enable(),
+                !oe_active,
+                "plane 1: trail blank should have OE blank"
+            );
+
+            let active_idx = map_index(TRAIL_BLANK_DELAY);
+            assert_eq!(
+                plane.data[active_idx].output_enable(),
+                oe_active,
+                "plane 1: pixel after trail blank should have OE active"
+            );
+
+            let near_end = map_index(TEST_COLS - 2);
+            assert_eq!(
+                plane.data[near_end].output_enable(),
+                oe_active,
+                "plane 1: near-end pixel should have OE active (no lead blank)"
+            );
+
+            let latch_idx = map_index(TEST_COLS - 1);
+            assert_eq!(
+                plane.data[latch_idx].output_enable(),
+                !oe_active,
+                "plane 1: latch should have OE blank"
+            );
+        }
+    }
+
+    #[test]
+    fn single_plane_buffer_has_both_blanks_with_prev_addr() {
+        type OnePlane = DmaFrameBuffer<16, TEST_COLS, 1>;
+        let fb = OnePlane::new();
+        let oe_active = !cfg!(feature = "invert-oe");
+
+        for row_idx in 0..16 {
+            let prev_addr = if row_idx == 0 { 15 } else { row_idx - 1 } as u16;
+            let plane = &fb.rows[row_idx].pixels[0];
+
+            // Single plane uses prev_addr
+            assert_eq!(
+                plane.data[map_index(0)].addr(),
+                prev_addr,
+                "single plane row {row_idx}: should use prev_addr"
+            );
+
+            let trail_idx = map_index(0);
+            assert_eq!(
+                plane.data[trail_idx].output_enable(),
+                !oe_active,
+                "single plane: trail blank should have OE blank"
+            );
+
+            let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+            assert_eq!(
+                plane.data[lead_idx].output_enable(),
+                !oe_active,
+                "single plane: lead blank should have OE blank"
+            );
+
+            let active_idx = map_index(TRAIL_BLANK_DELAY);
+            assert_eq!(
+                plane.data[active_idx].output_enable(),
+                oe_active,
+                "single plane: active pixel should have OE active"
+            );
+        }
+    }
+
+    #[test]
+    fn set_pixel_maps_top_half_bits_per_plane() {
+        let mut fb = TestBuffer::new();
+        let color = Color::new(0b1010_0101, 0b0101_1010, 0b1111_0000);
+        fb.set_pixel(Point::new(2, 3), color);
+
+        for plane_idx in 0..TEST_PLANES {
+            let bit = 8 - TEST_PLANES + plane_idx;
+            let entry = fb.rows[3].pixels[plane_idx].data[map_index(2)];
+            assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
+            assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
+            assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
+        }
+    }
+
+    #[test]
+    fn set_pixel_maps_bottom_half_bits_per_plane() {
+        let mut fb = TestBuffer::new();
+        let color = Color::new(0b1100_0011, 0b0011_1100, 0b1001_0110);
+        fb.set_pixel(Point::new(4, 20), color);
+
+        for plane_idx in 0..TEST_PLANES {
+            let bit = 8 - TEST_PLANES + plane_idx;
+            let entry = fb.rows[4].pixels[plane_idx].data[map_index(4)];
+            assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
+            assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
+            assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
+        }
+    }
+
+    #[test]
+    fn erase_clears_only_color_bits() {
+        let mut fb = TestBuffer::new();
+        let oe_before = fb.rows[0].pixels[0].data[map_index(1)].output_enable();
+        fb.set_pixel(Point::new(0, 0), Color::WHITE);
+        fb.erase();
+
+        for row in &fb.rows {
+            for plane in &row.pixels {
+                for entry in &plane.data {
+                    assert!(!entry.red1());
+                    assert!(!entry.grn1());
+                    assert!(!entry.blu1());
+                    assert!(!entry.red2());
+                    assert!(!entry.grn2());
+                    assert!(!entry.blu2());
+                }
+            }
+        }
+
+        assert_eq!(
+            fb.rows[0].pixels[0].data[map_index(1)].output_enable(),
+            oe_before
+        );
+    }
+
+    #[test]
+    fn erase_preserves_latch_and_oe_pattern() {
+        let fb_fresh = TestBuffer::new();
+        let mut fb = TestBuffer::new();
+        fb.set_pixel(Point::new(0, 0), Color::WHITE);
+        fb.erase();
+
+        for row_idx in 0..16 {
+            for plane_idx in 0..TEST_PLANES {
+                for col in 0..TEST_COLS {
+                    let entry = fb.rows[row_idx].pixels[plane_idx].data[col];
+                    let fresh = fb_fresh.rows[row_idx].pixels[plane_idx].data[col];
+                    assert_eq!(
+                        entry.output_enable(),
+                        fresh.output_enable(),
+                        "OE mismatch at row {row_idx} plane {plane_idx} col {col}"
+                    );
+                    assert_eq!(
+                        entry.latch(),
+                        fresh.latch(),
+                        "latch mismatch at row {row_idx} plane {plane_idx} col {col}"
+                    );
+                    assert_eq!(
+                        entry.addr(),
+                        fresh.addr(),
+                        "addr mismatch at row {row_idx} plane {plane_idx} col {col}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn erase_preserves_gap() {
+        let fb_fresh = TestBuffer::new();
+        let mut fb = TestBuffer::new();
+        fb.set_pixel(Point::new(0, 0), Color::WHITE);
+        fb.erase();
+
+        for row_idx in 0..16 {
+            assert_eq!(
+                fb.rows[row_idx].gap, fb_fresh.rows[row_idx].gap,
+                "gap mismatch at row {row_idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn bcm_const_fns_return_expected_values() {
+        assert_eq!(TestBuffer::bcm_chunk_count(), TEST_PLANES);
+        assert_eq!(
+            TestBuffer::bcm_chunk_bytes(),
+            TEST_COLS * core::mem::size_of::<Entry>()
+        );
+        assert_eq!(TestBuffer::bcm_row_count(), 16);
+        assert_eq!(TestBuffer::bcm_row_bytes(), TRAILER_BYTES);
+    }
+
+    #[test]
+    fn draw_target_iter_sets_pixels() {
+        let mut fb = TestBuffer::new();
+        let pixels = [Pixel(Point::new(1, 1), Color::RED)];
+        let result = fb.draw_iter(pixels);
+        assert!(result.is_ok());
+
+        for plane_idx in 0..TEST_PLANES {
+            let bit = 8 - TEST_PLANES + plane_idx;
+            let entry = fb.rows[1].pixels[plane_idx].data[map_index(1)];
+            assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
+            assert!(!entry.grn1());
+            assert!(!entry.blu1());
+        }
+    }
+
+    #[test]
+    fn set_pixel_ignores_out_of_bounds_and_negative() {
+        let mut fb = TestBuffer::new();
+        let before = fb.rows;
+        fb.set_pixel(Point::new(-1, 0), Color::WHITE);
+        fb.set_pixel(Point::new(0, -1), Color::WHITE);
+        fb.set_pixel(Point::new(TEST_COLS as i32, 0), Color::WHITE);
+        fb.set_pixel(Point::new(0, 32), Color::WHITE);
+        assert_eq!(fb.rows, before);
+    }
+
+    #[test]
+    #[cfg(feature = "skip-black-pixels")]
+    fn test_skip_black_pixels_enabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.rows[5].pixels[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels enabled, this should be ignored
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should still be red (black write was skipped)
+        assert!(fb.rows[5].pixels[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[cfg(not(feature = "skip-black-pixels"))]
+    fn test_skip_black_pixels_disabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.rows[5].pixels[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels disabled, this should overwrite
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should now be black (all bits false)
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[5].pixels[0].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[should_panic(expected = "NROWS must be within 1..=32")]
+    fn new_panics_for_too_many_rows() {
+        let _ = DmaFrameBuffer::<33, TEST_COLS, 8>::new();
+    }
+
+    #[test]
+    #[should_panic(expected = "PLANES must be within 1..=8")]
+    fn new_panics_for_too_many_planes() {
+        let _ = DmaFrameBuffer::<16, TEST_COLS, 9>::new();
+    }
+
+    #[test]
+    fn pixel_row_ptr_len_returns_correct_pointers() {
+        let fb = TestBuffer::new();
+        let (ptr, len) = fb.pixel_row_ptr_len(0, 0);
+        assert_eq!(len, TEST_COLS * core::mem::size_of::<Entry>());
+        assert_eq!(ptr, (&raw const fb.rows[0].pixels[0]).cast::<u8>());
+    }
+
+    #[test]
+    fn trailer_ptr_len_returns_correct_pointers() {
+        let fb = TestBuffer::new();
+        let (ptr, len) = fb.trailer_ptr_len(0);
+        assert_eq!(len, TRAILER_BYTES);
+        assert_eq!(ptr, (&raw const fb.rows[0].gap).cast::<u8>());
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn pixel_row_ptr_len_panics_for_invalid_row() {
+        let fb = TestBuffer::new();
+        let _ = fb.pixel_row_ptr_len(16, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn pixel_row_ptr_len_panics_for_invalid_plane() {
+        let fb = TestBuffer::new();
+        let _ = fb.pixel_row_ptr_len(0, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn trailer_ptr_len_panics_for_invalid_row() {
+        let fb = TestBuffer::new();
+        let _ = fb.trailer_ptr_len(16);
+    }
+
+    #[test]
+    fn origin_dimensions_match_panel_geometry() {
+        let fb = TestBuffer::new();
+        assert_eq!(fb.size(), Size::new(TEST_COLS as u32, 32));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let fb_default = TestBuffer::default();
+        let fb_new = TestBuffer::new();
+        assert_eq!(fb_default.rows, fb_new.rows);
+    }
+
+    #[test]
+    fn debug_impl_includes_shape_information() {
+        let fb = TestBuffer::new();
+        let s = format!("{fb:?}");
+        assert!(s.contains("DmaFrameBuffer"));
+        assert!(s.contains("row_count"));
+        assert!(s.contains("planes"));
+    }
+
+    static STATIC_FB: TestBuffer = TestBuffer::new();
+
+    #[test]
+    fn static_construction_is_formatted() {
+        let runtime_fb = TestBuffer::new();
+
+        for (ri, row) in STATIC_FB.rows.iter().enumerate() {
+            assert_eq!(
+                row.pixels, runtime_fb.rows[ri].pixels,
+                "static vs runtime pixel mismatch at row {ri}"
+            );
+            assert_eq!(
+                row.gap, runtime_fb.rows[ri].gap,
+                "static vs runtime gap mismatch at row {ri}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_reinitializes_at_runtime() {
+        let mut fb = TestBuffer::new();
+        fb.erase();
+        fb.format();
+
+        for (ri, row) in fb.rows.iter().enumerate() {
+            assert_eq!(
+                row.pixels, STATIC_FB.rows[ri].pixels,
+                "re-formatted vs static pixel mismatch at row {ri}"
+            );
+            assert_eq!(
+                row.gap, STATIC_FB.rows[ri].gap,
+                "re-formatted vs static gap mismatch at row {ri}"
+            );
+        }
+    }
+
+    #[test]
+    fn framebuffer_operations_trait_delegates_correctly() {
+        let mut fb = TestBuffer::new();
+        FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
+
+        // Plane 7 (MSB) carries bit 7; GREEN = 0xFF so bit 7 is set
+        assert!(fb.rows[5].pixels[TEST_PLANES - 1].data[map_index(3)].grn1());
+
+        FrameBufferOperations::erase(&mut fb);
+        for row in &fb.rows {
+            for plane in &row.pixels {
+                for entry in &plane.data {
+                    assert!(!entry.red1());
+                    assert!(!entry.grn1());
+                    assert!(!entry.blu1());
+                    assert!(!entry.red2());
+                    assert!(!entry.grn2());
+                    assert!(!entry.blu2());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_data_size_matches_expected_layout() {
+        let expected_pixels = core::mem::size_of::<PixelPlane<TEST_COLS>>() * TEST_PLANES;
+        let expected_trailer = TRAILER_BYTES;
+        assert_eq!(
+            core::mem::size_of::<RowData<TEST_COLS, 8>>(),
+            expected_pixels + expected_trailer
+        );
+    }
+
+    #[test]
+    fn bcm_segment_count_equals_rows_times_planes_plus_trailer() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        assert_eq!(fb.bcm_segment_count(), 16 * (TEST_PLANES + trailer));
+    }
+
+    #[test]
+    fn bcm_segments_per_group_equals_planes_plus_trailer() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        assert_eq!(fb.bcm_segments_per_group(), TEST_PLANES + trailer);
+        assert_eq!(
+            fb.bcm_segment_count() % fb.bcm_segments_per_group(),
+            0,
+            "segment count must be divisible by segments_per_group"
+        );
+    }
+
+    #[test]
+    fn bcm_segments_interleave_pixel_and_trailer() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        let segments_per_row = TEST_PLANES + trailer;
+
+        for row in 0..16usize {
+            for plane in 0..TEST_PLANES {
+                let idx = row * segments_per_row + plane;
+                let seg = fb.bcm_segment(idx);
+                let (ptr, len) = fb.pixel_row_ptr_len(row, plane);
+                assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane {plane}");
+                assert_eq!(seg.len, len, "wrong len at row {row} plane {plane}");
+                assert_eq!(
+                    seg.reps,
+                    1 << plane,
+                    "wrong reps at row {row} plane {plane}"
+                );
+            }
+
+            if HAS_TRAILER {
+                let trailer_idx = row * segments_per_row + TEST_PLANES;
+                let seg = fb.bcm_segment(trailer_idx);
+                let (ptr, len) = fb.trailer_ptr_len(row);
+                assert_eq!(seg.ptr, ptr, "wrong trailer ptr at row {row}");
+                assert_eq!(seg.len, len, "wrong trailer len at row {row}");
+                assert_eq!(seg.reps, 1, "trailer reps must be 1 at row {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn bcm_segment_total_reps_per_row() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        let segments_per_row = TEST_PLANES + trailer;
+
+        for row in 0..16usize {
+            let pixel_reps: usize = (0..TEST_PLANES)
+                .map(|p| fb.bcm_segment(row * segments_per_row + p).reps)
+                .sum();
+            assert_eq!(
+                pixel_reps,
+                (1 << TEST_PLANES) - 1,
+                "total pixel reps wrong for row {row}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn bcm_segment_panics_for_invalid_index() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        let segments_per_row = TEST_PLANES + trailer;
+        let _ = fb.bcm_segment(16 * segments_per_row);
+    }
+
+    #[test]
+    fn dma_descriptor_count_matches_expected() {
+        let pixel_bytes = TEST_COLS * core::mem::size_of::<Entry>();
+        let max_chunk = 4092;
+        let descs_per_pixel = pixel_bytes.div_ceil(max_chunk);
+        let descs_per_trailer = if TRAILER_BYTES > 0 {
+            TRAILER_BYTES.div_ceil(max_chunk)
+        } else {
+            0
+        };
+        let total_pixel_reps = (1usize << TEST_PLANES) - 1;
+        let expected = 16 * (descs_per_pixel * total_pixel_reps + descs_per_trailer);
+        assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
+    }
+
+    #[test]
+    fn bcm_segment_data_contains_written_pixels() {
+        use crate::FrameBuffer;
+
+        const TRINITY_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+            128
+        } else {
+            64
+        };
+        type TrinityBuf = DmaFrameBuffer<32, TRINITY_COLS, 5>;
+        let mut fb = TrinityBuf::new();
+
+        fb.set_pixel(Point::new(10, 0), Color::WHITE);
+
+        let col_idx = map_index(10);
+
+        for plane_idx in 0..5usize {
+            let seg = fb.bcm_segment(plane_idx);
+
+            let data = unsafe { core::slice::from_raw_parts(seg.ptr as *const u16, TRINITY_COLS) };
+            let raw = data[col_idx];
+            let entry = Entry::from_raw(raw);
+
+            let bit = 8 - 5 + plane_idx; // LSB-first
+            let expect_r = (0xFF >> bit) & 1 != 0;
+            let expect_g = (0xFF >> bit) & 1 != 0;
+            let expect_b = (0xFF >> bit) & 1 != 0;
+            assert_eq!(
+                entry.red1(),
+                expect_r,
+                "plane {plane_idx} (bit {bit}) R1 mismatch: raw={raw:#06x}"
+            );
+            assert_eq!(
+                entry.grn1(),
+                expect_g,
+                "plane {plane_idx} (bit {bit}) G1 mismatch: raw={raw:#06x}"
+            );
+            assert_eq!(
+                entry.blu1(),
+                expect_b,
+                "plane {plane_idx} (bit {bit}) B1 mismatch: raw={raw:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn bcm_segment_data_contains_gradient_pixels() {
+        use crate::FrameBuffer;
+
+        const TRINITY_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+            128
+        } else {
+            64
+        };
+        type TrinityBuf = DmaFrameBuffer<32, TRINITY_COLS, 5>;
+        let mut fb = TrinityBuf::new();
+
+        let step: u8 = (256 / TRINITY_COLS) as u8;
+        for x in 0..TRINITY_COLS {
+            let brightness = (x as u8).wrapping_mul(step);
+            fb.set_pixel(Point::new(x as i32, 0), Color::new(brightness, 0, 0));
+        }
+
+        let mut any_nonzero = false;
+        for plane_idx in 0..5usize {
+            let seg = fb.bcm_segment(plane_idx);
+            let data = unsafe { core::slice::from_raw_parts(seg.ptr as *const u16, TRINITY_COLS) };
+
+            for x in 0..TRINITY_COLS {
+                let col_idx = map_index(x);
+                let entry = Entry::from_raw(data[col_idx]);
+                let brightness = (x as u8).wrapping_mul(step);
+                let bit = 8 - 5 + plane_idx; // LSB-first
+                let expect_r = (brightness >> bit) & 1 != 0;
+                assert_eq!(
+                    entry.red1(),
+                    expect_r,
+                    "x={x} plane={plane_idx} bit={bit} brightness={brightness} \
+                     raw={:#06x}",
+                    data[col_idx]
+                );
+                if expect_r {
+                    any_nonzero = true;
+                }
+            }
+        }
+        assert!(
+            any_nonzero,
+            "gradient should produce at least some non-zero color bits"
+        );
+    }
+
+    #[test]
+    fn make_row_plane_template_both_false_blanks_only_latch() {
+        let t = make_row_plane_template::<TEST_COLS>(5, false, false);
+        for i in 0..TEST_COLS {
+            let entry = t[map_index(i)];
+            assert_eq!(entry.addr(), 5);
+            if i == TEST_COLS - 1 {
+                assert!(entry.latch(), "last entry must latch");
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_BLANK,
+                    "latch should be OE blank"
+                );
+            } else {
+                assert!(!entry.latch(), "col {i} must not latch");
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_ACTIVE,
+                    "col {i} should be OE active"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn make_row_plane_template_trail_only() {
+        let t = make_row_plane_template::<TEST_COLS>(5, true, false);
+        for i in 0..TEST_COLS {
+            let entry = t[map_index(i)];
+            if i < TRAIL_BLANK_DELAY || i == TEST_COLS - 1 {
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_BLANK,
+                    "col {i} should be OE blank"
+                );
+            } else {
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_ACTIVE,
+                    "col {i} should be OE active"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn make_row_plane_template_lead_only() {
+        let t = make_row_plane_template::<TEST_COLS>(5, false, true);
+        for i in 0..TEST_COLS {
+            let entry = t[map_index(i)];
+            if i >= TEST_COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_BLANK,
+                    "col {i} should be lead blank"
+                );
+            } else {
+                assert_eq!(
+                    entry.0 & 0b1_0000_0000,
+                    OE_ACTIVE,
+                    "col {i} should be OE active"
+                );
+            }
+        }
+    }
+}

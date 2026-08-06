@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+* `lead-blank-32` and `trail-blank-32` features extending blanking delay options to 32 pixel-clock cycles.
+
+* **Row-major bitplane framebuffer** (`bitplane::plain::row::DmaFrameBuffer`).
+  Groups all bit-planes for a single row contiguously instead of storing entire
+  planes together. Optimized for row-by-row BCM rendering where the driver
+  replays each plane's pixel data for brightness weighting before moving to the
+  next row, reducing ghosting on panels with slow row drivers. Planes are stored
+  LSB-first (plane 0 = 1 rep, plane N-1 = 2^(N-1) reps).
+
+* `skip-black-pixels` support for all bitplane framebuffers
+  (`bitplane::plain::frame`, `bitplane::plain::row`, and `bitplane::latched`).
+
+* Compile-time validation of `NROWS` (1..=32) and `PLANES` (1..=8) for all
+  bitplane framebuffers. Invalid configurations now panic in `const fn new()`
+  — a compile-time error for `static` framebuffers — instead of silently
+  corrupting the DMA stream.
+
+### ⚠️ Breaking
+
+* **`FrameBuffer` trait now exposes BCM segments instead of raw plane
+  pointers.** The old methods `get_word_size()`, `plane_count()`, and
+  `plane_ptr_len()` have been replaced with `bcm_segment_count()`,
+  `bcm_segment()`, and `bcm_segments_per_group()`. The `Word` associated type
+  is retained. All built-in framebuffers and tiling wrappers implement the new
+  interface.
+
+  **Migration:** if you implemented `FrameBuffer` on a custom type, replace
+  `plane_count` / `plane_ptr_len` with the segment methods. Each former plane
+  becomes one `BcmSegment { ptr, len, reps }`.
+
 ## [0.11.0] - 2026-08-02
 
 ### Added

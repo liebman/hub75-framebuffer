@@ -74,7 +74,7 @@ use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
-use crate::FrameBuffer;
+use crate::{BcmSegment, FrameBuffer};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 #[cfg(feature = "lead-blank-1")]
@@ -87,13 +87,16 @@ const LEAD_BLANK_DELAY: usize = 4;
 const LEAD_BLANK_DELAY: usize = 8;
 #[cfg(feature = "lead-blank-16")]
 const LEAD_BLANK_DELAY: usize = 16;
+#[cfg(feature = "lead-blank-32")]
+const LEAD_BLANK_DELAY: usize = 32;
 
 #[cfg(not(any(
     feature = "lead-blank-1",
     feature = "lead-blank-2",
     feature = "lead-blank-4",
     feature = "lead-blank-8",
-    feature = "lead-blank-16"
+    feature = "lead-blank-16",
+    feature = "lead-blank-32"
 )))]
 const LEAD_BLANK_DELAY: usize = 0;
 
@@ -107,13 +110,16 @@ const TRAIL_BLANK_DELAY: usize = 4;
 const TRAIL_BLANK_DELAY: usize = 8;
 #[cfg(feature = "trail-blank-16")]
 const TRAIL_BLANK_DELAY: usize = 16;
+#[cfg(feature = "trail-blank-32")]
+const TRAIL_BLANK_DELAY: usize = 32;
 
 #[cfg(not(any(
     feature = "trail-blank-1",
     feature = "trail-blank-2",
     feature = "trail-blank-4",
     feature = "trail-blank-8",
-    feature = "trail-blank-16"
+    feature = "trail-blank-16",
+    feature = "trail-blank-32"
 )))]
 const TRAIL_BLANK_DELAY: usize = 0;
 
@@ -314,8 +320,15 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     DmaFrameBuffer<NROWS, COLS, PLANES>
 {
     /// Creates a new frame buffer.
+    ///
+    /// # Panics
+    /// Panics if `NROWS` is not within `1..=32` (5-bit row address) or
+    /// `PLANES` is not within `1..=8` (8-bit color depth). In const contexts
+    /// (e.g. `static` framebuffers) this is a compile-time error.
     #[must_use]
     pub const fn new() -> Self {
+        assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
+        assert!(PLANES >= 1 && PLANES <= 8, "PLANES must be within 1..=8");
         let mut instance = Self {
             planes: [[Row::new(); NROWS]; PLANES],
         };
@@ -333,6 +346,17 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
         NROWS * core::mem::size_of::<Row<COLS>>()
+    }
+
+    /// Computes the number of DMA descriptors required for this framebuffer.
+    ///
+    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
+    #[must_use]
+    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
+        let chunk_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
+        let descs_per_plane = chunk_bytes.div_ceil(max_chunk);
+        let total_reps = (1usize << PLANES) - 1;
+        descs_per_plane * total_reps
     }
 
     /// Returns the number of rows per plane for row-based BCM.
@@ -380,6 +404,13 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     #[inline]
     fn set_pixel_internal(&mut self, x: usize, y: usize, color: Color) {
         if x >= COLS || y >= NROWS * 2 {
+            return;
+        }
+
+        // Early exit for black pixels - common in UI backgrounds
+        // Only enabled when skip-black-pixels feature is active
+        #[cfg(feature = "skip-black-pixels")]
+        if color == Color::BLACK {
             return;
         }
 
@@ -445,18 +476,19 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u8;
 
-    fn plane_count(&self) -> usize {
+    fn bcm_segment_count(&self) -> usize {
         PLANES
     }
 
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+    fn bcm_segment(&self, index: usize) -> BcmSegment {
         assert!(
-            plane_idx < PLANES,
-            "plane_idx {plane_idx} out of range for {PLANES} planes"
+            index < PLANES,
+            "segment index {index} out of range for {PLANES} planes"
         );
-        let ptr = self.planes[plane_idx].as_ptr().cast::<u8>();
+        let ptr = self.planes[index].as_ptr().cast::<u8>();
         let len = NROWS * core::mem::size_of::<Row<COLS>>();
-        (ptr, len)
+        let reps = 1usize << (PLANES - 1 - index);
+        BcmSegment { ptr, len, reps }
     }
 }
 
@@ -512,11 +544,16 @@ mod tests {
     use embedded_graphics::prelude::*;
     use std::format;
 
-    type TestBuffer = DmaFrameBuffer<16, 64, 8>;
+    const TEST_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+        128
+    } else {
+        64
+    };
+    type TestBuffer = DmaFrameBuffer<16, TEST_COLS, 8>;
 
     #[test]
     fn row_format_sets_address_and_control_bits() {
-        const TEST_N: usize = 64;
+        const TEST_N: usize = TEST_COLS;
         let mut row = Row::<TEST_N>::new();
         row.format(5);
         let latch_count = row.address.iter().filter(|a| a.latch()).count();
@@ -627,9 +664,67 @@ mod tests {
         let before = fb.planes;
         fb.set_pixel(Point::new(-1, 0), Color::WHITE);
         fb.set_pixel(Point::new(0, -1), Color::WHITE);
-        fb.set_pixel(Point::new(64, 0), Color::WHITE);
+        fb.set_pixel(Point::new(TEST_COLS as i32, 0), Color::WHITE);
         fb.set_pixel(Point::new(0, 32), Color::WHITE);
         assert_eq!(fb.planes, before);
+    }
+
+    #[test]
+    #[cfg(feature = "skip-black-pixels")]
+    fn test_skip_black_pixels_enabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.planes[0][5].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels enabled, this should be ignored
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should still be red (black write was skipped)
+        assert!(fb.planes[0][5].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[cfg(not(feature = "skip-black-pixels"))]
+    fn test_skip_black_pixels_disabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.planes[0][5].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels disabled, this should overwrite
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should now be black (all bits false)
+        assert!(!fb.planes[0][5].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][5].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[should_panic(expected = "NROWS must be within 1..=32")]
+    fn new_panics_for_too_many_rows() {
+        let _ = DmaFrameBuffer::<33, TEST_COLS, 8>::new();
+    }
+
+    #[test]
+    #[should_panic(expected = "PLANES must be within 1..=8")]
+    fn new_panics_for_too_many_planes() {
+        let _ = DmaFrameBuffer::<16, TEST_COLS, 9>::new();
     }
 
     #[test]
@@ -637,33 +732,14 @@ mod tests {
         assert_eq!(TestBuffer::bcm_chunk_count(), 8);
         assert_eq!(
             TestBuffer::bcm_chunk_bytes(),
-            16 * core::mem::size_of::<Row<64>>()
+            16 * core::mem::size_of::<Row<TEST_COLS>>()
         );
-    }
-
-    #[test]
-    fn frame_buffer_trait_accessors_report_expected_values() {
-        let fb = TestBuffer::new();
-        let as_trait: &dyn FrameBuffer<Word = u8> = &fb;
-        assert_eq!(as_trait.get_word_size(), crate::WordSize::Eight);
-        assert_eq!(as_trait.plane_count(), 8);
-
-        let (ptr, len) = as_trait.plane_ptr_len(0);
-        assert_eq!(len, 16 * core::mem::size_of::<Row<64>>());
-        assert_eq!(ptr, fb.planes[0].as_ptr().cast::<u8>());
-    }
-
-    #[test]
-    #[should_panic(expected = "out of range")]
-    fn plane_ptr_len_panics_for_invalid_plane() {
-        let fb = TestBuffer::new();
-        let _ = fb.plane_ptr_len(8);
     }
 
     #[test]
     fn origin_dimensions_match_panel_geometry() {
         let fb = TestBuffer::new();
-        assert_eq!(fb.size(), Size::new(64, 32));
+        assert_eq!(fb.size(), Size::new(TEST_COLS as u32, 32));
     }
 
     #[test]
@@ -677,7 +753,7 @@ mod tests {
 
     #[test]
     fn row_format_sets_exactly_one_data_word_with_oe_low() {
-        const TEST_N: usize = 64;
+        const TEST_N: usize = TEST_COLS;
         let mut row = Row::<TEST_N>::new();
         row.format(9);
 
@@ -696,8 +772,8 @@ mod tests {
 
     #[test]
     fn default_constructors_match_new() {
-        let row_default = Row::<64>::default();
-        let row_new = Row::<64>::new();
+        let row_default = Row::<TEST_COLS>::default();
+        let row_new = Row::<TEST_COLS>::new();
         assert_eq!(row_default, row_new);
 
         let fb_default = TestBuffer::default();
@@ -749,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_blanking_delay() {
-        let mut row = Row::<64>::new();
+        let mut row = Row::<TEST_COLS>::new();
         row.format(5);
 
         let oe_active = !cfg!(feature = "invert-oe");
@@ -764,13 +840,13 @@ mod tests {
         assert_eq!(row.data[first_active_idx].output_enable(), oe_active);
 
         // Lead blank: indices before latch (DMA end = physical left edge)
-        let last_active_idx = map_index(64 - LEAD_BLANK_DELAY - 2);
+        let last_active_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 2);
         assert_eq!(row.data[last_active_idx].output_enable(), oe_active);
 
-        let lead_blank_idx = map_index(64 - LEAD_BLANK_DELAY - 1);
+        let lead_blank_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
         assert_eq!(row.data[lead_blank_idx].output_enable(), !oe_active);
 
-        let last_pixel_idx = map_index(63);
+        let last_pixel_idx = map_index(TEST_COLS - 1);
         assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
     }
 
@@ -812,5 +888,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bcm_segment_count_equals_planes() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        assert_eq!(fb.bcm_segment_count(), 8);
+    }
+
+    #[test]
+    fn bcm_segments_have_correct_reps() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        for i in 0..8 {
+            let seg = fb.bcm_segment(i);
+            assert_eq!(seg.reps, 1 << (7 - i), "wrong reps for segment {i}");
+        }
+    }
+
+    #[test]
+    fn bcm_segments_point_to_plane_data() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let plane_len = 16 * core::mem::size_of::<Row<TEST_COLS>>();
+        for i in 0..8 {
+            let seg = fb.bcm_segment(i);
+            let expected_ptr = fb.planes[i].as_ptr().cast::<u8>();
+            assert_eq!(seg.ptr, expected_ptr, "wrong ptr for segment {i}");
+            assert_eq!(seg.len, plane_len, "wrong len for segment {i}");
+        }
+    }
+
+    #[test]
+    fn bcm_segment_total_reps_equals_2_pow_planes_minus_1() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let total: usize = (0..fb.bcm_segment_count())
+            .map(|i| fb.bcm_segment(i).reps)
+            .sum();
+        assert_eq!(total, (1 << 8) - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn bcm_segment_panics_for_invalid_index() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let _ = fb.bcm_segment(8);
+    }
+
+    #[test]
+    fn dma_descriptor_count_matches_expected() {
+        let chunk_bytes = 16 * core::mem::size_of::<Row<TEST_COLS>>();
+        let max_chunk = 4092;
+        let descs_per_plane = chunk_bytes.div_ceil(max_chunk);
+        let total_reps = (1usize << 8) - 1;
+        let expected = descs_per_plane * total_reps;
+        assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
     }
 }

@@ -23,7 +23,12 @@ jobs:
           - "invert-oe"
           - "lead-blank-4,trail-blank-16"
           - "lead-blank-16,trail-blank-4"
+          - "lead-blank-32,trail-blank-32"
           - "inter-row-blank-8"
+          - "esp32-ordering"
+          - "tail-closes-latch"
+          - "esp32-ordering,tail-closes-latch"
+          - "skip-black-pixels"
     steps:
       - uses: actions/checkout@v4
       

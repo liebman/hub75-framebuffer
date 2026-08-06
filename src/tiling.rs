@@ -14,7 +14,7 @@
 
 use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, WordSize};
+use crate::{BcmSegment, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer};
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
 
@@ -496,16 +496,16 @@ impl<
 {
     type Word = F::Word;
 
-    fn get_word_size(&self) -> WordSize {
-        self.0.get_word_size()
+    fn bcm_segment_count(&self) -> usize {
+        self.0.bcm_segment_count()
     }
 
-    fn plane_count(&self) -> usize {
-        self.0.plane_count()
+    fn bcm_segment(&self, index: usize) -> BcmSegment {
+        self.0.bcm_segment(index)
     }
 
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        self.0.plane_ptr_len(plane_idx)
+    fn bcm_segments_per_group(&self) -> usize {
+        self.0.bcm_segments_per_group()
     }
 }
 
@@ -697,16 +697,16 @@ unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for Remappe
 impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M> {
     type Word = F::Word;
 
-    fn get_word_size(&self) -> WordSize {
-        self.0.get_word_size()
+    fn bcm_segment_count(&self) -> usize {
+        self.0.bcm_segment_count()
     }
 
-    fn plane_count(&self) -> usize {
-        self.0.plane_count()
+    fn bcm_segment(&self, index: usize) -> BcmSegment {
+        self.0.bcm_segment(index)
     }
 
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        self.0.plane_ptr_len(plane_idx)
+    fn bcm_segments_per_group(&self) -> usize {
+        self.0.bcm_segments_per_group()
     }
 }
 
@@ -943,12 +943,17 @@ mod tests {
     impl FrameBuffer for TestFrameBuffer {
         type Word = u8;
 
-        fn plane_count(&self) -> usize {
+        fn bcm_segment_count(&self) -> usize {
             1
         }
 
-        fn plane_ptr_len(&self, _plane_idx: usize) -> (*const u8, usize) {
-            (self.buf.as_ptr(), self.buf.len())
+        fn bcm_segment(&self, index: usize) -> BcmSegment {
+            assert!(index == 0);
+            BcmSegment {
+                ptr: self.buf.as_ptr(),
+                len: self.buf.len(),
+                reps: 1,
+            }
         }
     }
 
@@ -1164,54 +1169,6 @@ mod tests {
         assert_eq!(len, inner_len);
     }
 
-    #[test]
-    #[allow(deprecated)]
-    fn test_tiled_get_word_size_passthrough() {
-        const TILED_COLS: usize = 2;
-        const TILED_ROWS: usize = 2;
-        const ROWS: usize = 32;
-        const PANEL_COLS: usize = 64;
-        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
-
-        let fb = TiledFrameBuffer::<
-            TestFrameBuffer,
-            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
-            ROWS,
-            PANEL_COLS,
-            { crate::compute_rows(ROWS) },
-            2,
-            { crate::compute_frame_count(2) },
-            TILED_ROWS,
-            TILED_COLS,
-            FB_COLS,
-        >(TestFrameBuffer::new(), core::marker::PhantomData);
-        assert_eq!(fb.get_word_size(), WordSize::Eight);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_tiled_get_word_size_eight_passthrough() {
-        const TILED_COLS: usize = 2;
-        const TILED_ROWS: usize = 2;
-        const ROWS: usize = 32;
-        const PANEL_COLS: usize = 64;
-        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
-
-        let fb = TiledFrameBuffer::<
-            TestFrameBuffer,
-            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
-            ROWS,
-            PANEL_COLS,
-            { crate::compute_rows(ROWS) },
-            2,
-            { crate::compute_frame_count(2) },
-            TILED_ROWS,
-            TILED_COLS,
-            FB_COLS,
-        >(TestFrameBuffer::new(), core::marker::PhantomData);
-        assert_eq!(fb.get_word_size(), WordSize::Eight);
-    }
-
     // Remapper that generates very large coordinates to trigger u16 truncation in remap_point
     struct Huge<
         const PANEL_ROWS: usize,
@@ -1313,10 +1270,6 @@ mod tests {
             TILED_COLS,
             FB_COLS,
         >::new();
-
-        // Default constructs inner TestFrameBuffer::default()
-        assert_eq!(fb_default.get_word_size(), WordSize::Eight);
-        assert_eq!(fb_new.get_word_size(), WordSize::Eight);
 
         // Size comes from OriginDimensions impl on TiledFrameBuffer (via M::virtual_size)
         let expected_size = Size::new((PANEL_COLS * TILED_COLS) as u32, (ROWS * TILED_ROWS) as u32);
@@ -1558,24 +1511,6 @@ mod tests {
         let (ptr, len) = unsafe { fb.read_buffer() };
         assert_eq!(ptr, inner_ptr);
         assert_eq!(len, inner_len);
-    }
-
-    #[test]
-    fn test_remapped_get_word_size_passthrough() {
-        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
-            TestFrameBuffer::new(),
-            core::marker::PhantomData,
-        );
-        assert_eq!(fb.get_word_size(), WordSize::Eight);
-    }
-
-    #[test]
-    fn test_remapped_plane_count_passthrough() {
-        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
-            TestFrameBuffer::new(),
-            core::marker::PhantomData,
-        );
-        assert_eq!(fb.plane_count(), 1);
     }
 
     #[test]
