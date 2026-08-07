@@ -90,6 +90,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the module split. The `bitplane::latched::DmaFrameBuffer` path is
   unchanged via re-export.
 
+* **Bitplane plane-major framebuffers now store planes LSB-first and emit
+  suffix-coalesced BCM segments** (`bitplane::plain::frame::DmaFrameBuffer`
+  and `bitplane::latched::frame::DmaFrameBuffer`). Plane 0 now carries the
+  LSB (previously the MSB), and the segment for plane `k` spans planes
+  `k..PLANES` with `2^(k-1)` repetitions (segment 0 spans all planes with 1
+  repetition), halving the number of DMA transfers per frame (`2^(PLANES-1)`
+  instead of `2^PLANES - 1`) with identical brightness. `bcm_segment_count()`
+  and `bcm_segments_per_group()` are unchanged, but segment `len`/`reps`
+  values changed.
+
+  **Migration:** drivers must no longer assume one segment == one plane: a
+  segment's `len` may exceed the platform's maximum DMA transfer size, so
+  split each repetition into `div_ceil(len, max_chunk)` descriptors
+  (`dma_descriptor_count(max_chunk)` now accounts for this). Per-group ISR
+  cadence is unchanged (`PLANES` groups per frame), but inter-ISR intervals
+  changed, and the longest contiguous single-plane (MSB) run per frame is
+  now `2^(PLANES-2)` plane passes.
+
 ## [0.11.0] - 2026-08-02
 
 ### Added

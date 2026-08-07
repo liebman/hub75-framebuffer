@@ -6,12 +6,12 @@
 //! bit-weight (the MSB plane 2^7 times, the LSB plane once) so that the
 //! weighted repetition counts produce correct BCM brightness.
 //!
-//! Plane ordering differs by layout: the `frame` modules ([`plain::frame`],
-//! [`latched::frame`]) store planes **MSB-first** (plane 0 = MSB), while the
-//! `row` modules ([`plain::row`], [`latched::row`]) store them **LSB-first**
-//! (plane 0 = LSB). Drivers should follow the
-//! [`FrameBuffer`](crate::FrameBuffer) segment sequence rather than assuming
-//! an order.
+//! All layouts store planes **LSB-first** (plane 0 = LSB), and each BCM
+//! segment streams a contiguous *suffix* of planes, repeated just enough
+//! times to bring each plane's total coverage to its bit-weight — halving
+//! the number of DMA transfers per scan with identical brightness. Drivers
+//! should follow the [`FrameBuffer`](crate::FrameBuffer) segment sequence
+//! rather than assuming an order.
 //!
 //! Two variants are provided:
 //!

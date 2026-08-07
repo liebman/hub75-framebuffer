@@ -65,9 +65,9 @@
 //! directly. To render, configure the DMA descriptor chain so that each
 //! plane's data is output a number of times equal to its bit-weight (the MSB
 //! plane 128 times, the LSB plane once). Memory scales linearly with the
-//! number of planes. Each module offers a plane-major (`frame`, MSB-first)
-//! and a row-major (`row`, LSB-first) layout; see their documentation for
-//! the exact scan order.
+//! number of planes. Each module offers a plane-major (`frame`) and a
+//! row-major (`row`) layout — both LSB-first with suffix-coalesced BCM
+//! segments; see their documentation for the exact scan order.
 //!
 //! All four variants have configurable row and column dimensions, support
 //! `embedded-graphics` via the `DrawTarget` trait, and expose their BCM
@@ -299,13 +299,18 @@ pub struct BcmSegment {
 /// # Segment Ordering and Grouping
 ///
 /// **Frame-major** (bitplane) framebuffers produce `PLANES` segments with
-/// `segments_per_group = 1` (each plane is its own group):
+/// `segments_per_group = 1` (each segment is its own group). Planes are
+/// **LSB-first** and stored contiguously, so each segment streams a whole
+/// *suffix* of planes: the segment for plane `k` starts at plane `k`,
+/// covers the remaining planes, and is repeated just enough times to bring
+/// plane `k`'s total coverage to `2^k`:
 ///
 /// ```text
-/// group 0: (plane0_ptr, plane_bytes, 2^(PLANES-1))
-/// group 1: (plane1_ptr, plane_bytes, 2^(PLANES-2))
+/// group 0: (plane0_ptr, PLANES*plane_bytes, 1)      // LSB; all planes
+/// group 1: (plane1_ptr, (PLANES-1)*plane_bytes, 1)
+/// group 2: (plane2_ptr, (PLANES-2)*plane_bytes, 2)
 /// …
-/// group N: (planeN_ptr, plane_bytes, 1)
+/// group N: (planeN_ptr, plane_bytes, 2^(PLANES-2))  // MSB
 /// ```
 ///
 /// **Row-major** framebuffers produce `NROWS × (PLANES + has_gap +

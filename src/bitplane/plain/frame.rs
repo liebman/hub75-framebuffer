@@ -7,6 +7,30 @@
 //! Each row is `COLS` 16-bit entries plus an optional inter-row gap, so total
 //! size is approximately `PLANES × NROWS × (COLS + INTER_ROW_BLANK) × 2`
 //! bytes.
+//!
+//! Planes are stored **LSB-first**: plane 0 carries the least-significant
+//! bit and is displayed once per frame; plane `PLANES-1` carries the MSB and
+//! is displayed `2^(PLANES-1)` times per frame.
+//!
+//! # DMA Descriptor Pattern
+//!
+//! The planes are contiguous (`repr(C)`), so each BCM segment streams a
+//! whole *suffix* of planes: the segment for plane `k` starts at plane `k`
+//! and covers planes `k..PLANES`, repeated just enough times to bring plane
+//! `k`'s total coverage to `2^k` displays per frame. This halves the number
+//! of DMA transfers per frame — `2^(PLANES-1)` instead of `2^PLANES - 1` —
+//! while the streamed bytes, and therefore the brightness, are unchanged.
+//! The inter-row gap (embedded in each row) and the optional tail word
+//! (embedded in each plane) travel inside the coalesced segments
+//! automatically.
+//!
+//! ```text
+//! planes 0..PLANES      × 1 rep        → planes[0..]
+//! planes 1..PLANES      × 1 rep        → planes[1..]
+//! planes 2..PLANES      × 2 reps       → planes[2..]
+//! …
+//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → planes[PLANES-1]
+//! ```
 
 use core::convert::Infallible;
 
@@ -100,6 +124,20 @@ impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
     }
 }
 
+/// Shape of the coalesced BCM segment for plane `plane_idx`: returns
+/// `(covered_planes, reps)` — how many planes the segment spans (starting at
+/// `plane_idx`) and how many times that suffix is streamed. See the
+/// module-level "DMA Descriptor Pattern" section for the full scheme.
+const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
+    let covered = planes - plane_idx;
+    let reps = if plane_idx == 0 {
+        1
+    } else {
+        1 << (plane_idx - 1)
+    };
+    (covered, reps)
+}
+
 /// Plane-major BCM framebuffer (per-plane storage).
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -142,12 +180,21 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// Computes the number of DMA descriptors required for this framebuffer.
     ///
     /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
+    ///
+    /// One descriptor chain per BCM segment repetition; a segment spanning
+    /// several planes may itself need multiple descriptors when it exceeds
+    /// `max_chunk`.
     #[must_use]
     pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
-        let chunk_bytes = core::mem::size_of::<PlaneData<NROWS, COLS>>();
-        let descs_per_plane = chunk_bytes.div_ceil(max_chunk);
-        let total_reps = (1usize << PLANES) - 1;
-        descs_per_plane * total_reps
+        let plane_bytes = core::mem::size_of::<PlaneData<NROWS, COLS>>();
+        let mut descs = 0usize;
+        let mut plane = 0usize;
+        while plane < PLANES {
+            let (covered, reps) = plane_seg_shape(plane, PLANES);
+            descs += (plane_bytes * covered).div_ceil(max_chunk) * reps;
+            plane += 1;
+        }
+        descs
     }
 
     /// Formats the frame buffer with row addresses and control bits.
@@ -219,7 +266,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         let blue = color.b();
 
         for plane_idx in 0..PLANES {
-            let bit = 7_u32.saturating_sub(plane_idx as u32);
+            let bit = (8 - PLANES + plane_idx) as u32;
             let bits = ((u8::from(((blue >> bit) & 1) != 0)) << 2)
                 | ((u8::from(((green >> bit) & 1) != 0)) << 1)
                 | u8::from(((red >> bit) & 1) != 0);
@@ -283,9 +330,12 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
             index < PLANES,
             "segment index {index} out of range for {PLANES} planes"
         );
+        // Plane k: stream the contiguous plane suffix k..PLANES (embedded
+        // per-row gaps and per-plane tail words included) just enough times
+        // to bring plane k's total coverage to 2^k.
         let ptr = (&raw const self.planes[index]).cast::<u8>();
-        let len = core::mem::size_of::<PlaneData<NROWS, COLS>>();
-        let reps = 1usize << (PLANES - 1 - index);
+        let (covered, reps) = plane_seg_shape(index, PLANES);
+        let len = core::mem::size_of::<PlaneData<NROWS, COLS>>() * covered;
         BcmSegment { ptr, len, reps }
     }
 }
@@ -392,7 +442,7 @@ mod tests {
         fb.set_pixel(Point::new(2, 3), color);
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
+            let bit = plane_idx;
             let entry = fb.planes[plane_idx].rows[3].data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
@@ -407,7 +457,7 @@ mod tests {
         fb.set_pixel(Point::new(4, 20), color);
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
+            let bit = plane_idx;
             let entry = fb.planes[plane_idx].rows[4].data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
@@ -449,7 +499,7 @@ mod tests {
         assert!(result.is_ok());
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
+            let bit = plane_idx;
             let entry = fb.planes[plane_idx].rows[1].data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
@@ -696,7 +746,8 @@ mod tests {
         let fb = TestBuffer::new();
         for i in 0..8 {
             let seg = fb.bcm_segment(i);
-            assert_eq!(seg.reps, 1 << (7 - i), "wrong reps for segment {i}");
+            let expected = if i == 0 { 1 } else { 1 << (i - 1) };
+            assert_eq!(seg.reps, expected, "wrong reps for segment {i}");
         }
     }
 
@@ -709,18 +760,39 @@ mod tests {
             let seg = fb.bcm_segment(i);
             let expected_ptr = (&raw const fb.planes[i]).cast::<u8>();
             assert_eq!(seg.ptr, expected_ptr, "wrong ptr for segment {i}");
-            assert_eq!(seg.len, plane_len, "wrong len for segment {i}");
+            assert_eq!(seg.len, plane_len * (8 - i), "wrong len for segment {i}");
         }
     }
 
     #[test]
-    fn bcm_segment_total_reps_equals_2_pow_planes_minus_1() {
+    fn bcm_segment_total_reps_is_halved_by_coalescing() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
         let total: usize = (0..fb.bcm_segment_count())
             .map(|i| fb.bcm_segment(i).reps)
             .sum();
-        assert_eq!(total, (1 << 8) - 1);
+        assert_eq!(total, 1 << (8 - 1));
+    }
+
+    #[test]
+    fn bcm_segment_plane_coverage_matches_bcm_weights() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let plane_bytes = core::mem::size_of::<PlaneData<16, TEST_COLS>>();
+
+        for plane in 0..8usize {
+            // Sum the reps of every segment that spans this plane: the
+            // segment for plane `first` covers `len / plane_bytes`
+            // consecutive planes starting at `first`.
+            let mut coverage = 0;
+            for first in 0..=plane {
+                let seg = fb.bcm_segment(first);
+                if first + seg.len / plane_bytes > plane {
+                    coverage += seg.reps;
+                }
+            }
+            assert_eq!(coverage, 1 << plane, "plane {plane} coverage wrong");
+        }
     }
 
     #[test]
@@ -735,9 +807,26 @@ mod tests {
     fn dma_descriptor_count_matches_expected() {
         let plane_bytes = core::mem::size_of::<PlaneData<16, TEST_COLS>>();
         let max_chunk = 4092;
-        let descs_per_plane = plane_bytes.div_ceil(max_chunk);
-        let total_reps = (1usize << 8) - 1;
-        let expected = descs_per_plane * total_reps;
+        let mut expected = 0;
+        for plane in 0..8usize {
+            let covered = 8 - plane;
+            let reps = if plane == 0 { 1 } else { 1 << (plane - 1) };
+            expected += (plane_bytes * covered).div_ceil(max_chunk) * reps;
+        }
         assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
+    }
+
+    #[test]
+    fn dma_descriptor_count_chunks_oversized_segments() {
+        // With a tiny max_chunk every coalesced segment is split into
+        // per-plane-sized descriptors.
+        let plane_bytes = core::mem::size_of::<PlaneData<16, TEST_COLS>>();
+        let mut expected = 0;
+        for plane in 0..8usize {
+            let covered = 8 - plane;
+            let reps = if plane == 0 { 1 } else { 1 << (plane - 1) };
+            expected += covered * reps;
+        }
+        assert_eq!(TestBuffer::dma_descriptor_count(plane_bytes), expected);
     }
 }

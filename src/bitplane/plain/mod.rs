@@ -48,13 +48,15 @@
 //! number of times equal to its bit-weight (2^7 for the MSB plane down to
 //! 2^0 for the LSB plane).
 //!
-//! The plane ordering differs between the two layout variants:
-//!
-//! - [`frame`] stores planes **MSB-first**: plane 0 carries bit 7 and is
-//!   scanned 128 times, plane 7 carries bit 0 and is scanned once.
-//! - [`row`] stores planes **LSB-first**: plane 0 carries bit 0 and is
-//!   scanned once, plane 7 carries bit 7 and is scanned 128 times. See its
-//!   module documentation for why this avoids a separate primer segment.
+//! Both layout variants store planes **LSB-first**: plane 0 carries bit 0
+//! and is displayed once per scan, plane 7 carries bit 7 and is displayed
+//! 128 times. Each BCM segment streams a contiguous *suffix* of planes,
+//! repeated just enough times to bring each plane's total coverage to its
+//! bit-weight — halving the number of DMA transfers per scan with identical
+//! brightness. LSB-first ordering also means the first plane after an
+//! address change displays stale data with minimal visual weight, avoiding
+//! a separate primer segment. See the [`frame`] and [`row`] module
+//! documentation for the exact scan order.
 //!
 //! See <https://www.batsocks.co.uk/readme/art_bcm_1.htm> for background on
 //! BCM.
