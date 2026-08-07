@@ -18,17 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   planes together. Optimized for row-by-row BCM rendering where the driver
   replays each plane's pixel data for brightness weighting before moving to the
   next row, reducing ghosting on panels with slow row drivers. Planes are stored
-  LSB-first (plane 0 = 1 rep, plane N-1 = 2^(N-1) reps). The `inter-row-blank-*`
-  gap is streamed between plane 0 (shifted out with the previous row's address)
-  and plane 1 (whose first pixel changes the address), holding `prev_addr`
-  with `OE` blank.
+  LSB-first and contiguously, so each BCM segment streams a whole suffix of
+  planes: the segment for plane `k` covers planes `k..N` just enough times to
+  reach `2^k` total displays, halving the number of DMA transfers per row
+  (`2^(N-1)` instead of `2^N - 1`) with identical brightness. The
+  `inter-row-blank-*` gap is streamed between plane 0 (shifted out with the
+  previous row's address) and plane 1 (whose first pixel changes the address),
+  holding `prev_addr` with `OE` blank.
 
 * **Row-major latched bitplane framebuffer** (`bitplane::latched::row::DmaFrameBuffer`).
   Groups all bit-planes for a single row contiguously, each followed by its
   four address bytes, instead of storing entire planes together. Planes are
   stored LSB-first and every plane carries the current row address — the
   external latch holds the previous row's address during plane 0's shift, so
-  no `prev_addr` handling is needed. Blanking mirrors the plain row-major
+  no `prev_addr` handling is needed. As in the plain row-major layout, each
+  BCM segment streams a suffix of planes, halving the number of DMA
+  transfers per row (`2^(N-1)` instead of `2^N - 1`) with identical
+  brightness. Blanking mirrors the plain row-major
   layout: the `lead-blank-*` delay applies to the first plane (whose address
   bytes change the row address) and the `trail-blank-*` delay to the second
   plane; all other planes run full-width. The `inter-row-blank-*` gap is

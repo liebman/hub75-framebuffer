@@ -283,7 +283,8 @@ pub struct BcmSegment {
     pub ptr: *const u8,
     /// Byte length of this segment.
     pub len: usize,
-    /// BCM repetition count (e.g. 128 for MSB plane, 1 for LSB).
+    /// BCM repetition count: how many times the driver streams this segment
+    /// before advancing to the next one.
     pub reps: usize,
 }
 
@@ -309,20 +310,28 @@ pub struct BcmSegment {
 ///
 /// **Row-major** framebuffers produce `NROWS × (PLANES + has_gap +
 /// has_tail)` segments with `segments_per_group = PLANES + has_gap +
-/// has_tail` (one group per row). Planes are **LSB-first** within each row,
-/// and the inter-row gap segment sits between plane 0 and plane 1 — the
-/// point where the row address changes:
+/// has_tail` (one group per row). Planes are **LSB-first** within each row
+/// and stored contiguously, so each pixel segment streams a whole *suffix*
+/// of planes: the segment for plane `k` starts at plane `k`, covers the
+/// remaining planes, and is repeated just enough times to bring plane `k`'s
+/// total coverage to `2^k` (halving the number of DMA transfers per row
+/// while the streamed bytes are unchanged). The inter-row gap segment sits
+/// between plane 0 and plane 1 — the point where the row address changes;
+/// with a gap enabled, plane 0 stands alone and plane 1's segment gets
+/// 2 reps:
 ///
 /// ```text
 /// group 0 (row 0):
-///   (row0_plane0_ptr, pixel_bytes, 1)             // LSB
-///   (row0_gap_ptr, gap_bytes, 1)                  // inter-row gap, if enabled
-///   (row0_plane1_ptr, pixel_bytes, 2)
+///   (row0_plane0_ptr, PLANES*pixel_bytes, 1)        // LSB; whole plane block,
+///                                                   // or plane 0 only if gap
+///   (row0_gap_ptr, gap_bytes, 1)                    // inter-row gap, if enabled
+///   (row0_plane1_ptr, (PLANES-1)*pixel_bytes, 1|2)  // 2 reps if gap enabled
+///   (row0_plane2_ptr, (PLANES-2)*pixel_bytes, 2)
 ///   …
-///   (row0_planeN_ptr, pixel_bytes, 2^(PLANES-1))  // MSB
-///   (row0_trailer_ptr, trailer_bytes, 1)          // tail, if enabled
+///   (row0_planeN_ptr, pixel_bytes, 2^(PLANES-2))    // MSB
+///   (row0_trailer_ptr, trailer_bytes, 1)            // tail, if enabled
 /// group 1 (row 1):
-///   (row1_plane0_ptr, pixel_bytes, 1)
+///   (row1_plane0_ptr, PLANES*pixel_bytes, 1)
 ///   …
 /// ```
 ///

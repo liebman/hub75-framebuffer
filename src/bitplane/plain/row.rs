@@ -25,9 +25,9 @@
 //! order is independent of storage order.
 //!
 //! Planes are stored **LSB-first**: plane 0 carries the least-significant
-//! bit and gets 1 DMA repetition; plane `PLANES-1` carries the MSB and
-//! gets `2^(PLANES-1)` repetitions. This ordering means the first plane
-//! after an address change displays stale data for only 1 rep (minimal
+//! bit and is displayed once per row; plane `PLANES-1` carries the MSB and
+//! is displayed `2^(PLANES-1)` times per row. This ordering means the first
+//! plane after an address change displays stale data for only 1 rep (minimal
 //! visual weight), eliminating the need for a separate primer segment.
 //!
 //! Each plane's pixel row contains COLS entries with a latch at the very
@@ -70,15 +70,37 @@
 //!
 //! # DMA Descriptor Pattern
 //!
-//! For each row the driver builds descriptors like:
+//! The plane rows of a row are contiguous (`repr(C)`), so each BCM segment
+//! streams a whole *suffix* of planes: the segment for plane `k` starts at
+//! plane `k` and covers planes `k..PLANES`, repeated just enough times to
+//! bring plane `k`'s total coverage to `2^k` displays per row. This halves
+//! the number of DMA transfers per row — `2^(PLANES-1)` instead of
+//! `2^PLANES - 1` — while the streamed bytes, and therefore the brightness,
+//! are unchanged.
+//!
+//! For each row the driver builds descriptors like (no inter-row gap):
 //!
 //! ```text
-//! plane 0 (LSB)        × 1 rep             → rows[r].pixels[0]  (prev_addr)
-//! inter-row gap        × 1                 → rows[r].gap        (prev_addr, OE blank)
-//! plane 1              × 2 reps            → rows[r].pixels[1]  (addr)
+//! planes 0..PLANES      × 1 rep        → rows[r].pixels[0..]  (plane 0: prev_addr)
+//! planes 1..PLANES      × 1 rep        → rows[r].pixels[1..]  (addr)
+//! planes 2..PLANES      × 2 reps       → rows[r].pixels[2..]
 //! …
-//! plane PLANES-1 (MSB) × 2^(PLANES-1) reps → rows[r].pixels[PLANES-1] (addr)
-//! trailer              × 1                 → rows[r].padding + tail (if enabled)
+//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → rows[r].pixels[PLANES-1] (addr)
+//! trailer               × 1            → rows[r].padding + tail (if enabled)
+//! ```
+//!
+//! With an `inter-row-blank-*` feature enabled, plane 0 stands alone so the
+//! gap can be streamed between plane 0's latch and plane 1's address change,
+//! and plane 1's segment gets a second rep to preserve its weight:
+//!
+//! ```text
+//! plane 0 (LSB)         × 1 rep        → rows[r].pixels[0]    (prev_addr)
+//! inter-row gap         × 1            → rows[r].gap          (prev_addr, OE blank)
+//! planes 1..PLANES      × 2 reps       → rows[r].pixels[1..]  (addr)
+//! planes 2..PLANES      × 2 reps       → rows[r].pixels[2..]
+//! …
+//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → rows[r].pixels[PLANES-1]
+//! trailer               × 1            → rows[r].padding + tail (if enabled)
 //! ```
 
 use core::convert::Infallible;
@@ -135,6 +157,30 @@ const HAS_GAP: bool = GAP_BYTES > 0;
 /// Whether this configuration has a non-empty end-of-row trailer segment.
 #[allow(clippy::absurd_extreme_comparisons)]
 const HAS_TRAILER: bool = TRAILER_BYTES > 0;
+
+/// Shape of the coalesced BCM segment for plane `plane_idx`: returns
+/// `(covered_planes, reps)` — how many planes the segment spans (starting at
+/// `plane_idx`) and how many times that suffix is streamed. See the
+/// module-level "DMA Descriptor Pattern" section for the full scheme.
+///
+/// With an inter-row gap, plane 0 stands alone (the gap segment is streamed
+/// between plane 0 and plane 1), so plane 1's segment needs 2 reps to
+/// preserve its weight.
+const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
+    let covered = if HAS_GAP && plane_idx == 0 {
+        1
+    } else {
+        planes - plane_idx
+    };
+    let reps = if plane_idx == 0 {
+        1
+    } else if HAS_GAP && plane_idx == 1 {
+        2
+    } else {
+        1 << (plane_idx - 1)
+    };
+    (covered, reps)
+}
 
 /// Builds a per-plane pixel template for the row-major layout.
 ///
@@ -331,10 +377,21 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// Computes the number of DMA descriptors required for this framebuffer.
     ///
     /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
+    ///
+    /// One descriptor chain per BCM segment repetition (a segment spanning
+    /// several planes may itself need multiple descriptors when it exceeds
+    /// `max_chunk`), plus one per inter-row gap and end-of-row trailer
+    /// segment.
     #[must_use]
     pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
-        let pixel_bytes = COLS * core::mem::size_of::<Entry>();
-        let descs_per_pixel = pixel_bytes.div_ceil(max_chunk);
+        let plane_bytes = COLS * core::mem::size_of::<Entry>();
+        let mut descs_per_pixel = 0usize;
+        let mut plane = 0usize;
+        while plane < PLANES {
+            let (covered, reps) = plane_seg_shape(plane, PLANES);
+            descs_per_pixel += (plane_bytes * covered).div_ceil(max_chunk) * reps;
+            plane += 1;
+        }
         #[allow(clippy::absurd_extreme_comparisons)]
         let descs_per_gap = if GAP_BYTES > 0 {
             GAP_BYTES.div_ceil(max_chunk)
@@ -347,8 +404,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         } else {
             0
         };
-        let total_pixel_reps = (1usize << PLANES) - 1;
-        NROWS * (descs_per_pixel * total_pixel_reps + descs_per_gap + descs_per_trailer)
+        NROWS * (descs_per_pixel + descs_per_gap + descs_per_trailer)
     }
 
     /// Formats the framebuffer with row addresses and control bits.
@@ -540,19 +596,33 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
         let row_idx = index / segments_per_row;
         let within_row = index % segments_per_row;
         if within_row == 0 {
-            // Plane 0 (LSB, prev_addr): 1 rep.
-            let (ptr, len) = self.pixel_row_ptr_len(row_idx, 0);
-            BcmSegment { ptr, len, reps: 1 }
+            // Plane 0 (LSB, prev_addr): 1 rep. Without an inter-row gap this
+            // segment streams the whole contiguous plane block (all planes,
+            // one pass); with a gap it covers plane 0 only and the gap
+            // segment follows.
+            let (ptr, plane_len) = self.pixel_row_ptr_len(row_idx, 0);
+            let (covered, reps) = plane_seg_shape(0, PLANES);
+            BcmSegment {
+                ptr,
+                len: plane_len * covered,
+                reps,
+            }
         } else if HAS_GAP && within_row == 1 {
             // Inter-row gap: blanked dead clocks between plane 0's latch
             // and the address change at plane 1's first pixel.
             let (ptr, len) = self.gap_ptr_len(row_idx);
             BcmSegment { ptr, len, reps: 1 }
         } else if within_row < PLANES + gap {
+            // Plane k: stream the contiguous plane suffix k..PLANES just
+            // enough times to bring plane k's total coverage to 2^k.
             let plane_idx = within_row - gap;
-            let (ptr, len) = self.pixel_row_ptr_len(row_idx, plane_idx);
-            let reps = 1usize << plane_idx;
-            BcmSegment { ptr, len, reps }
+            let (ptr, plane_len) = self.pixel_row_ptr_len(row_idx, plane_idx);
+            let (covered, reps) = plane_seg_shape(plane_idx, PLANES);
+            BcmSegment {
+                ptr,
+                len: plane_len * covered,
+                reps,
+            }
         } else {
             let (ptr, len) = self.trailer_ptr_len(row_idx);
             BcmSegment { ptr, len, reps: 1 }
@@ -1273,11 +1343,16 @@ mod tests {
         let segments_per_row = TEST_PLANES + gap + trailer;
 
         for row in 0..16usize {
-            // Plane 0 (LSB) comes first.
+            // Plane 0 (LSB) comes first; without a gap it covers all planes.
             let seg = fb.bcm_segment(row * segments_per_row);
-            let (ptr, len) = fb.pixel_row_ptr_len(row, 0);
+            let (ptr, plane_len) = fb.pixel_row_ptr_len(row, 0);
+            let covered0 = if HAS_GAP { 1 } else { TEST_PLANES };
             assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane 0");
-            assert_eq!(seg.len, len, "wrong len at row {row} plane 0");
+            assert_eq!(
+                seg.len,
+                plane_len * covered0,
+                "wrong len at row {row} plane 0"
+            );
             assert_eq!(seg.reps, 1, "wrong reps at row {row} plane 0");
 
             // The inter-row gap (if any) is streamed between plane 0 and 1.
@@ -1289,16 +1364,24 @@ mod tests {
                 assert_eq!(seg.reps, 1, "gap reps must be 1 at row {row}");
             }
 
-            // Planes 1.. follow the gap.
+            // Planes 1.. follow the gap; each streams the remaining suffix.
             for plane in 1..TEST_PLANES {
                 let idx = row * segments_per_row + plane + gap;
                 let seg = fb.bcm_segment(idx);
-                let (ptr, len) = fb.pixel_row_ptr_len(row, plane);
+                let (ptr, plane_len) = fb.pixel_row_ptr_len(row, plane);
+                let expected_reps = if HAS_GAP && plane == 1 {
+                    2
+                } else {
+                    1 << (plane - 1)
+                };
                 assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane {plane}");
-                assert_eq!(seg.len, len, "wrong len at row {row} plane {plane}");
                 assert_eq!(
-                    seg.reps,
-                    1 << plane,
+                    seg.len,
+                    plane_len * (TEST_PLANES - plane),
+                    "wrong len at row {row} plane {plane}"
+                );
+                assert_eq!(
+                    seg.reps, expected_reps,
                     "wrong reps at row {row} plane {plane}"
                 );
             }
@@ -1324,16 +1407,53 @@ mod tests {
         let segments_per_row = TEST_PLANES + gap + trailer;
 
         for row in 0..16usize {
-            // Plane 0 sits at offset 0, planes 1.. at offset 1 + gap.
-            let mut pixel_reps = fb.bcm_segment(row * segments_per_row).reps;
-            for plane in 1..TEST_PLANES {
-                pixel_reps += fb.bcm_segment(row * segments_per_row + plane + gap).reps;
+            // Suffix coalescing halves the per-row transfer count to
+            // 2^(PLANES-1); with an inter-row gap, plane 0 stands alone and
+            // plane 1's extra rep adds one more.
+            let mut pixel_reps = 0;
+            for plane in 0..TEST_PLANES {
+                // Plane 0 is at offset 0, planes 1.. at offset 1 + gap.
+                let offset = if plane == 0 { 0 } else { plane + gap };
+                pixel_reps += fb.bcm_segment(row * segments_per_row + offset).reps;
             }
-            assert_eq!(
-                pixel_reps,
-                (1 << TEST_PLANES) - 1,
-                "total pixel reps wrong for row {row}"
-            );
+            let expected = if HAS_GAP {
+                (1 << (TEST_PLANES - 1)) + 1
+            } else {
+                1 << (TEST_PLANES - 1)
+            };
+            assert_eq!(pixel_reps, expected, "total pixel reps wrong for row {row}");
+        }
+    }
+
+    #[test]
+    fn bcm_segment_plane_coverage_matches_bcm_weights() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let gap = if HAS_GAP { 1 } else { 0 };
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        let segments_per_row = TEST_PLANES + gap + trailer;
+        let plane_bytes = TEST_COLS * core::mem::size_of::<Entry>();
+
+        for row in 0..16usize {
+            for plane in 0..TEST_PLANES {
+                // Sum the reps of every pixel segment that spans this plane:
+                // the segment for plane `first` covers `len / plane_bytes`
+                // consecutive planes starting at `first`.
+                let mut coverage = 0;
+                for first in 0..=plane {
+                    // Plane 0 is at offset 0, planes 1.. at offset 1 + gap.
+                    let offset = if first == 0 { 0 } else { first + gap };
+                    let seg = fb.bcm_segment(row * segments_per_row + offset);
+                    if first + seg.len / plane_bytes > plane {
+                        coverage += seg.reps;
+                    }
+                }
+                assert_eq!(
+                    coverage,
+                    1 << plane,
+                    "plane {plane} coverage wrong for row {row}"
+                );
+            }
         }
     }
 
@@ -1350,23 +1470,54 @@ mod tests {
 
     #[test]
     fn dma_descriptor_count_matches_expected() {
-        let pixel_bytes = TEST_COLS * core::mem::size_of::<Entry>();
+        // Every coalesced segment for this geometry fits in a single
+        // descriptor, so the descriptor count equals the per-row transfer
+        // count times the number of rows.
         let max_chunk = 4092;
-        let descs_per_pixel = pixel_bytes.div_ceil(max_chunk);
-        let descs_per_gap = if GAP_BYTES > 0 {
-            GAP_BYTES.div_ceil(max_chunk)
+        let pixel_transfers = if HAS_GAP {
+            (1 << (TEST_PLANES - 1)) + 1
         } else {
-            0
+            1 << (TEST_PLANES - 1)
         };
-        let descs_per_trailer = if TRAILER_BYTES > 0 {
-            TRAILER_BYTES.div_ceil(max_chunk)
-        } else {
-            0
-        };
-        let total_pixel_reps = (1usize << TEST_PLANES) - 1;
-        let expected =
-            16 * (descs_per_pixel * total_pixel_reps + descs_per_gap + descs_per_trailer);
+        let gap = if HAS_GAP { 1 } else { 0 };
+        let trailer = if HAS_TRAILER { 1 } else { 0 };
+        let expected = 16 * (pixel_transfers + gap + trailer);
         assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
+    }
+
+    #[test]
+    fn dma_descriptor_count_chunks_oversized_segments() {
+        // With a tiny max_chunk every coalesced segment is split into
+        // per-plane-sized descriptors.
+        let plane_bytes = TEST_COLS * core::mem::size_of::<Entry>();
+        let mut pixel_descs = 0;
+        for plane in 0..TEST_PLANES {
+            let covered = if HAS_GAP && plane == 0 {
+                1
+            } else {
+                TEST_PLANES - plane
+            };
+            let reps = if plane == 0 {
+                1
+            } else if HAS_GAP && plane == 1 {
+                2
+            } else {
+                1 << (plane - 1)
+            };
+            pixel_descs += covered * reps;
+        }
+        let gap = if HAS_GAP {
+            GAP_BYTES.div_ceil(plane_bytes)
+        } else {
+            0
+        };
+        let trailer = if HAS_TRAILER {
+            TRAILER_BYTES.div_ceil(plane_bytes)
+        } else {
+            0
+        };
+        let expected = 16 * (pixel_descs + gap + trailer);
+        assert_eq!(TestBuffer::dma_descriptor_count(plane_bytes), expected);
     }
 
     #[test]
