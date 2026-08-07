@@ -18,7 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   planes together. Optimized for row-by-row BCM rendering where the driver
   replays each plane's pixel data for brightness weighting before moving to the
   next row, reducing ghosting on panels with slow row drivers. Planes are stored
-  LSB-first (plane 0 = 1 rep, plane N-1 = 2^(N-1) reps).
+  LSB-first (plane 0 = 1 rep, plane N-1 = 2^(N-1) reps). The `inter-row-blank-*`
+  gap is streamed between plane 0 (shifted out with the previous row's address)
+  and plane 1 (whose first pixel changes the address), holding `prev_addr`
+  with `OE` blank.
 
 * **Row-major latched bitplane framebuffer** (`bitplane::latched::row::DmaFrameBuffer`).
   Groups all bit-planes for a single row contiguously, each followed by its
@@ -28,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no `prev_addr` handling is needed. Blanking mirrors the plain row-major
   layout: the `lead-blank-*` delay applies to the first plane (whose address
   bytes change the row address) and the `trail-blank-*` delay to the second
-  plane; all other planes run full-width.
+  plane; all other planes run full-width. The `inter-row-blank-*` gap is
+  streamed between plane 0 (whose address bytes latch the data and change
+  the row address) and plane 1.
 
 * `skip-black-pixels` support for all bitplane framebuffers
   (`bitplane::plain::frame`, `bitplane::plain::row`, and `bitplane::latched`).

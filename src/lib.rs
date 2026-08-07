@@ -175,14 +175,19 @@
 //!
 //! ### Inter-row blanking features (`inter-row-blank-*`)
 //!
-//! Insert additional dead clock cycles at the end of each row. In plain
-//! framebuffers the gap entries hold the previous row address with `OE` HIGH
-//! (blank), deferring the address change to the first pixel of the next row
-//! and giving slow panels more time to finish blanking before the address
-//! lines move. In latched framebuffers the latch and address change are
-//! inseparable in hardware, so the gap simply adds extra blanked cycles after
-//! the address change. The gap entries are invisible to all drawing
-//! primitives — they only appear in the DMA stream.
+//! Insert additional dead clock cycles at the row transition, between the
+//! latch and the address-line change. In plain framebuffers the gap entries
+//! hold the previous row address with `OE` HIGH (blank), deferring the
+//! address change to the first pixel after the gap and giving slow panels
+//! more time to finish blanking before the address lines move. In latched
+//! framebuffers the latch and address change are inseparable in hardware,
+//! so the gap simply adds extra blanked cycles after the address change.
+//! Row-major bitplane framebuffers stream the gap between plane 0 (shifted
+//! out before the address change) and plane 1 (shifted out at/after it);
+//! all other framebuffers place it at the end of each row, between that
+//! row's latch and the next row's first pixel. The gap entries are
+//! invisible to all drawing primitives — they only appear in the DMA
+//! stream.
 //!
 //! | Feature              | Gap cycles | RAM cost per row       |
 //! |----------------------|------------|------------------------|
@@ -302,16 +307,20 @@ pub struct BcmSegment {
 /// group N: (planeN_ptr, plane_bytes, 1)
 /// ```
 ///
-/// **Row-major** framebuffers produce `NROWS × (PLANES + has_trailer)`
-/// segments with `segments_per_group = PLANES + has_trailer` (one group per
-/// row). Planes are **LSB-first** within each row:
+/// **Row-major** framebuffers produce `NROWS × (PLANES + has_gap +
+/// has_tail)` segments with `segments_per_group = PLANES + has_gap +
+/// has_tail` (one group per row). Planes are **LSB-first** within each row,
+/// and the inter-row gap segment sits between plane 0 and plane 1 — the
+/// point where the row address changes:
 ///
 /// ```text
 /// group 0 (row 0):
 ///   (row0_plane0_ptr, pixel_bytes, 1)             // LSB
+///   (row0_gap_ptr, gap_bytes, 1)                  // inter-row gap, if enabled
+///   (row0_plane1_ptr, pixel_bytes, 2)
 ///   …
 ///   (row0_planeN_ptr, pixel_bytes, 2^(PLANES-1))  // MSB
-///   (row0_trailer_ptr, trailer_bytes, 1)          // gap/tail, if enabled
+///   (row0_trailer_ptr, trailer_bytes, 1)          // tail, if enabled
 /// group 1 (row 1):
 ///   (row1_plane0_ptr, pixel_bytes, 1)
 ///   …
@@ -344,8 +353,8 @@ pub trait FrameBuffer {
     /// `bcm_segment_count()` must be divisible by this value.
     ///
     /// - **Frame-major** framebuffers return `1` (each plane is its own group).
-    /// - **Row-major** framebuffers return `PLANES + has_gap` (all planes for
-    ///   one row are linked into a single DMA transfer).
+    /// - **Row-major** framebuffers return `PLANES + has_gap + has_tail` (all
+    ///   segments for one row are linked into a single DMA transfer).
     ///
     /// Defaults to `1` for backward compatibility.
     fn bcm_segments_per_group(&self) -> usize {

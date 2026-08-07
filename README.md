@@ -183,12 +183,16 @@ conflicts will result.
 
 ### `inter-row-blank-4/8/16/32`
 
-Insert additional dead clock cycles at the end of each row. In plain
-framebuffers the gap entries hold the previous row address with `OE` HIGH
-(blank), deferring the address change to the first pixel of the next row and
-giving slow panels more time to finish blanking before the address lines move.
-In latched framebuffers the latch and address change are inseparable in
-hardware, so the gap simply adds extra blanked cycles after the address change.
+Insert additional dead clock cycles at the row transition, between the latch
+and the address-line change. In plain framebuffers the gap entries hold the
+previous row address with `OE` HIGH (blank), deferring the address change to
+the first pixel after the gap and giving slow panels more time to finish
+blanking before the address lines move. In latched framebuffers the latch
+and address change are inseparable in hardware, so the gap simply adds extra
+blanked cycles after the address change. Row-major bitplane framebuffers
+stream the gap between plane 0 (shifted out before the address change) and
+plane 1 (shifted out at/after it); all other framebuffers place it at the
+end of each row, between that row's latch and the next row's first pixel.
 
 | Feature              | Gap cycles | RAM cost per row                     |
 |----------------------|------------|--------------------------------------|
