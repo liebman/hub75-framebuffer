@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next row, reducing ghosting on panels with slow row drivers. Planes are stored
   LSB-first (plane 0 = 1 rep, plane N-1 = 2^(N-1) reps).
 
+* **Row-major latched bitplane framebuffer** (`bitplane::latched::row::DmaFrameBuffer`).
+  Groups all bit-planes for a single row contiguously, each followed by its
+  four address bytes, instead of storing entire planes together. Planes are
+  stored LSB-first and every plane carries the current row address — the
+  external latch holds the previous row's address during plane 0's shift, so
+  no `prev_addr` handling is needed. Blanking mirrors the plain row-major
+  layout: the `lead-blank-*` delay applies to the first plane (whose address
+  bytes change the row address) and the `trail-blank-*` delay to the second
+  plane; all other planes run full-width.
+
 * `skip-black-pixels` support for all bitplane framebuffers
   (`bitplane::plain::frame`, `bitplane::plain::row`, and `bitplane::latched`).
 
@@ -28,7 +38,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — a compile-time error for `static` framebuffers — instead of silently
   corrupting the DMA stream.
 
+* `tiling::QuarterScan` is now implemented for classic 1/16-scan 64×64 panels
+  (16 row addresses, four rows lit at a time). The four quarters of the panel
+  are mapped to side-by-side 64-column sections via a pluggable wiring variant
+  (the third type parameter — see `tiling::quarter_scan`): built-in variants
+  are `SectionsSwapped` (the default, verified on hardware), `Linear`,
+  `HalvesSwapped` and `Alternating`, and custom wirings can be added by
+  implementing `quarter_scan::Variant` downstream. The default places rows
+  0–15 on channel 1 section 1, rows 16–31 on channel 1 section 0, rows 32–47
+  on channel 2 section 1 and rows 48–63 on channel 2 section 0. The
+  framebuffer geometry
+  changed accordingly: `FB_ROWS` is now `PANEL_ROWS / 2` (32) and `FB_COLS`
+  is `PANEL_COLS * 2` (128) — previously the stub declared a 16×256 geometry
+  (8 addresses) that matched no real 1/16-scan panel and its `remap_xy`
+  panicked with `todo!()`. Pair with a bitplane
+  `DmaFrameBuffer<{ PANEL_ROWS / 4 }, { PANEL_COLS * 2 }, PLANES>`.
+  Coordinates outside the virtual canvas are clipped (mapped just past the
+  inner framebuffer's bounds) instead of panicking, matching the clipping
+  behavior embedded-graphics draw operations rely on.
+
 ### ⚠️ Breaking
+
+* `tiling::QuarterScan` gained a wiring-variant type parameter
+  (`QuarterScan<ROWS, COLS, V = quarter_scan::SectionsSwapped>`) and is no
+  longer value-constructible (private `PhantomData` field). Type-level usage
+  such as `QuarterScan<64, 64>` is source-compatible.
 
 * **`FrameBuffer` trait now exposes BCM segments instead of raw plane
   pointers.** The old methods `get_word_size()`, `plane_count()`, and
@@ -40,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Migration:** if you implemented `FrameBuffer` on a custom type, replace
   `plane_count` / `plane_ptr_len` with the segment methods. Each former plane
   becomes one `BcmSegment { ptr, len, reps }`.
+
+* **`bitplane::latched::Row` moved to `bitplane::latched::frame::Row`** as part
+  of the module split. The `bitplane::latched::DmaFrameBuffer` path is
+  unchanged via re-export.
 
 ## [0.11.0] - 2026-08-02
 

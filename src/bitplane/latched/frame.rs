@@ -1,203 +1,23 @@
-//! Bitplane framebuffer for an 8-bit latched HUB75 interface.
+//! Plane-major bitplane framebuffer for an 8-bit latched HUB75 interface.
 //!
-//! This module provides a framebuffer that stores colour data as separate
-//! bit-planes rather than the threshold-based frames used by
-//! [`crate::latched::DmaFrameBuffer`]. Each plane holds one bit of every
-//! colour channel, giving `PLANES` planes total (typically 8 for full 8-bit
-//! colour). Row addressing is carried by four trailing `Address` bytes per
-//! row, identical to the non-bitplane latched layout.
+//! Stores all rows for one bit-plane contiguously, then the next plane, etc.
+//! Planes are stored **MSB-first**: plane 0 carries the MSB (bit 7) of each
+//! colour channel and is scanned `2^(PLANES-1)` times per frame, plane
+//! `PLANES-1` carries the LSB (bit 0) and is scanned once.
 //!
-//! # Hardware Requirements
-//! Requires a parallel output peripheral capable of clocking 8 bits at a time,
-//! plus an external latch circuit to hold the row address and gate the pixel
-//! clock (same circuit as the non-bitplane latched variant).
-//!
-//! # HUB75 Signal Bit Mapping (8-bit words)
-//! Two distinct 8-bit words are streamed to the panel:
-//!
-//! 1. **Address / Timing (`Address`)** -- row-select and latch control.
-//! 2. **Pixel Data (`Entry`)** -- RGB bits for two sub-pixels plus OE/LAT
-//!    shadow bits.
-//!
-//! ```text
-//! Address word (row select & timing)
-//! ┌──7─┬──6──┬─5─-┬─4─-┬─3-─┬─2-─┬─1-─┬─0-─┐
-//! │ OE │ LAT │    │ E  │ D  │ C  │ B  │ A  │
-//! └────┴─────┴───-┴───-┴───-┴───-┴───-┴───-┘
-//! ```
-//! ```text
-//! Entry word (pixel data)
-//! ┌──7─┬──6──┬─5──┬─4──┬─3──┬─2──┬─1──┬─0──┐
-//! │ OE │ LAT │ B2 │ G2 │ R2 │ B1 │ G1 │ R1 │
-//! └────┴─────┴────┴────┴────┴────┴────┴────┘
-//! ```
-//!
-//! Bits 7-6 (OE/LAT) occupy the same positions in both words so the control
-//! lines stay valid throughout the DMA stream.
-//!
-//! # Bitplane BCM Rendering
-//! The framebuffer is organised into `PLANES` bit-planes. Plane 0 carries the
-//! MSB (bit 7) of each colour channel, plane 1 carries bit 6, and so on down
-//! to plane 7 which carries the LSB (bit 0).
-//!
-//! To produce correct brightness via Binary Code Modulation, configure the DMA
-//! descriptor chain so that each plane's data is output (scanned) a number of
-//! times equal to its bit-weight:
-//!
-//! ```text
-//! plane 0 (bit 7) → output 2^7 = 128 times
-//! plane 1 (bit 6) → output 2^6 =  64 times
-//! plane 2 (bit 5) → output 2^5 =  32 times
-//!   …
-//! plane 7 (bit 0) → output 2^0 =   1 time
-//! ```
-//!
-//! That is, each plane is scanned `2^(7 - plane_index)` times. The weighted
-//! repetition counts sum to 255, reproducing the full 8-bit intensity range.
-//! See <https://www.batsocks.co.uk/readme/art_bcm_1.htm> for background on
-//! BCM.
-//!
-//! # Memory Usage
-//! Memory scales linearly with `PLANES`: the buffer contains `PLANES` copies
-//! of the row data (one per bit-plane). Unlike the threshold-based
-//! [`crate::latched::DmaFrameBuffer`] whose frame count grows as
-//! `2^BITS - 1`, this layout uses exactly `PLANES` planes regardless of
-//! colour depth.
-//!
-//! Each row is `COLS` data bytes plus 4 address bytes, so total size is
-//! `PLANES * NROWS * (COLS + 4)` bytes.
+//! Each row is `COLS` data bytes plus 4 address bytes (and an optional
+//! inter-row gap), so total size is
+//! `PLANES × NROWS × (COLS + 4 + INTER_ROW_BLANK)` bytes.
 
 use core::convert::Infallible;
 
-use bitfield::bitfield;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
+use super::{make_data_template, map_index, Address, Entry, ADDR_TABLE, INTER_ROW_BLANK, OE_BLANK};
 use crate::Color;
 use crate::{BcmSegment, FrameBuffer};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
-
-#[cfg(feature = "lead-blank-1")]
-const LEAD_BLANK_DELAY: usize = 1;
-#[cfg(feature = "lead-blank-2")]
-const LEAD_BLANK_DELAY: usize = 2;
-#[cfg(feature = "lead-blank-4")]
-const LEAD_BLANK_DELAY: usize = 4;
-#[cfg(feature = "lead-blank-8")]
-const LEAD_BLANK_DELAY: usize = 8;
-#[cfg(feature = "lead-blank-16")]
-const LEAD_BLANK_DELAY: usize = 16;
-#[cfg(feature = "lead-blank-32")]
-const LEAD_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "lead-blank-1",
-    feature = "lead-blank-2",
-    feature = "lead-blank-4",
-    feature = "lead-blank-8",
-    feature = "lead-blank-16",
-    feature = "lead-blank-32"
-)))]
-const LEAD_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "trail-blank-1")]
-const TRAIL_BLANK_DELAY: usize = 1;
-#[cfg(feature = "trail-blank-2")]
-const TRAIL_BLANK_DELAY: usize = 2;
-#[cfg(feature = "trail-blank-4")]
-const TRAIL_BLANK_DELAY: usize = 4;
-#[cfg(feature = "trail-blank-8")]
-const TRAIL_BLANK_DELAY: usize = 8;
-#[cfg(feature = "trail-blank-16")]
-const TRAIL_BLANK_DELAY: usize = 16;
-#[cfg(feature = "trail-blank-32")]
-const TRAIL_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "trail-blank-1",
-    feature = "trail-blank-2",
-    feature = "trail-blank-4",
-    feature = "trail-blank-8",
-    feature = "trail-blank-16",
-    feature = "trail-blank-32"
-)))]
-const TRAIL_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "inter-row-blank-4")]
-const INTER_ROW_BLANK: usize = 4;
-#[cfg(feature = "inter-row-blank-8")]
-const INTER_ROW_BLANK: usize = 8;
-#[cfg(feature = "inter-row-blank-16")]
-const INTER_ROW_BLANK: usize = 16;
-#[cfg(feature = "inter-row-blank-32")]
-const INTER_ROW_BLANK: usize = 32;
-#[cfg(not(any(
-    feature = "inter-row-blank-4",
-    feature = "inter-row-blank-8",
-    feature = "inter-row-blank-16",
-    feature = "inter-row-blank-32"
-)))]
-const INTER_ROW_BLANK: usize = 0;
-
-#[cfg(not(feature = "invert-oe"))]
-const OE_ACTIVE: u8 = 0b1000_0000;
-#[cfg(not(feature = "invert-oe"))]
-const OE_BLANK: u8 = 0;
-
-#[cfg(feature = "invert-oe")]
-const OE_ACTIVE: u8 = 0;
-#[cfg(feature = "invert-oe")]
-const OE_BLANK: u8 = 0b1000_0000;
-
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq, Eq)]
-    #[repr(transparent)]
-    pub(crate) struct Address(u8);
-    impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) addr, set_addr: 4, 0;
-}
-
-impl Address {
-    pub const fn new() -> Self {
-        Self(0)
-    }
-}
-
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq)]
-    #[repr(transparent)]
-    pub(crate) struct Entry(u8);
-    impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) blu2, set_blu2: 5;
-    pub(crate) grn2, set_grn2: 4;
-    pub(crate) red2, set_red2: 3;
-    pub(crate) blu1, set_blu1: 2;
-    pub(crate) grn1, set_grn1: 1;
-    pub(crate) red1, set_red1: 0;
-}
-
-impl Entry {
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    const COLOR0_MASK: u8 = 0b0000_0111;
-    const COLOR1_MASK: u8 = 0b0011_1000;
-
-    #[inline]
-    fn set_color0_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR0_MASK) | (bits & Self::COLOR0_MASK);
-    }
-
-    #[inline]
-    fn set_color1_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR1_MASK) | ((bits << 3) & Self::COLOR1_MASK);
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
@@ -209,50 +29,6 @@ pub struct Row<const COLS: usize> {
     pub(crate) data: [Entry; COLS],
     pub(crate) address: [Address; 4],
     pub(crate) gap: [Entry; INTER_ROW_BLANK],
-}
-
-#[inline]
-const fn map_index(index: usize) -> usize {
-    #[cfg(feature = "esp32-ordering")]
-    {
-        index ^ 2
-    }
-    #[cfg(not(feature = "esp32-ordering"))]
-    {
-        index
-    }
-}
-
-const fn make_addr_table() -> [[Address; 4]; 32] {
-    let mut tbl = [[Address::new(); 4]; 32];
-    let mut addr = 0;
-    while addr < 32 {
-        tbl[addr][map_index(0)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(1)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(2)].0 = OE_BLANK | addr as u8;
-        tbl[addr][map_index(3)].0 = OE_BLANK;
-        addr += 1;
-    }
-    tbl
-}
-
-const ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
-
-#[allow(clippy::absurd_extreme_comparisons)]
-const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
-    let mut data = [Entry::new(); COLS];
-    let mut i = 0;
-    while i < COLS {
-        let mapped_i = map_index(i);
-        data[mapped_i].0 =
-            if i >= TRAIL_BLANK_DELAY && i < COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
-                OE_ACTIVE
-            } else {
-                OE_BLANK
-            };
-        i += 1;
-    }
-    data
 }
 
 impl<const COLS: usize> Row<COLS> {
@@ -540,6 +316,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
 mod tests {
     extern crate std;
 
+    use super::super::{make_addr_table, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
     use super::*;
     use embedded_graphics::prelude::*;
     use std::format;

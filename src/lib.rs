@@ -63,9 +63,11 @@
 //! **True bitplane** (`bitplane::plain`, `bitplane::latched`) -- each of
 //! `PLANES` planes (typically 8) stores one bit of every colour channel
 //! directly. To render, configure the DMA descriptor chain so that each
-//! plane's data is output `2^(7 - plane_index)` times (plane 0 = MSB is
-//! scanned 128 times, plane 7 = LSB is scanned once). Memory scales linearly
-//! with the number of planes.
+//! plane's data is output a number of times equal to its bit-weight (the MSB
+//! plane 128 times, the LSB plane once). Memory scales linearly with the
+//! number of planes. Each module offers a plane-major (`frame`, MSB-first)
+//! and a row-major (`row`, LSB-first) layout; see their documentation for
+//! the exact scan order.
 //!
 //! All four variants have configurable row and column dimensions, support
 //! `embedded-graphics` via the `DrawTarget` trait, and expose their BCM

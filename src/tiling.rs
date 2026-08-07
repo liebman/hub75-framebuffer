@@ -6,7 +6,8 @@
 //!
 //! Available remappers:
 //! - [`ChainTopRightDown`] — tiles multiple panels into a larger virtual display
-//! - [`QuarterScan`] — remaps for 1/16-scan (quarter-scan) 64×64 panels (stub — fill in `remap_xy` for your panel)
+//! - [`QuarterScan`] — remaps for 1/16-scan (quarter-scan) 64×64 panels, with
+//!   pluggable wiring variants (see [`quarter_scan`])
 //!
 //! The older [`TiledFrameBuffer`] is still available but deprecated in favour of
 //! [`RemappedFrameBuffer`], which has a simpler generic signature and works with
@@ -152,46 +153,156 @@ impl<
     }
 }
 
-/// Pixel remapper for panels with 1/4-scan (also called 1/16-scan on 64-row panels)
+/// Slot-assignment variants for [`QuarterScan`](crate::tiling::QuarterScan) panels
 ///
-/// Some LED panels — particularly 64×64 modules — use fewer address lines than
-/// the row count would suggest.  A "1/16-scan" 64×64 panel, for example, has
-/// only 16 row-address lines instead of the expected 32.  The panel internally
-/// maps 4 groups of 16 rows into separate horizontal sections of the shift
-/// register, so the physical framebuffer is 4× wider and 4× shorter than the
-/// logical display.
+/// A quarter-scan panel's four row groups can be wired to the four
+/// (channel, section) slots of the shift register in different orders
+/// depending on the driver chip and manufacturer.  Each variant below
+/// describes one common wiring; pick the one that matches your panel and
+/// supply it as the third type parameter of `QuarterScan`, e.g.
+/// `QuarterScan<64, 64, quarter_scan::Linear>`.
 ///
-/// **Important:** the exact interleaving pattern varies by driver chip and
-/// manufacturer (FM6126, ICN2037, MBI5153, etc.).  The [`remap_xy`] method
-/// must be filled in to match your specific panel.  The default implementation
-/// panics at runtime as a reminder.
+/// Panels with exotic wirings are supported without forking this crate:
+/// implement [`Variant`](crate::tiling::quarter_scan::Variant) on a local
+/// marker type.
+pub mod quarter_scan {
+    /// Group → (channel, section) slot assignment for a quarter-scan panel
+    ///
+    /// The table is indexed by row group (`y / (PANEL_ROWS / 4)`); each entry
+    /// is `(channel, section)` where channel 0 is the top framebuffer band
+    /// (framebuffer rows `0..PANEL_ROWS / 4`, channel 1 the bottom band) and
+    /// section selects which `PANEL_COLS`-wide half of that channel's shift
+    /// register the group is wired to.
+    pub trait Variant {
+        /// Group → (channel, section) slot table
+        const SLOT: [(usize, usize); 4];
+    }
+
+    /// Naive row order: group 0 → ch1/sec0, 1 → ch1/sec1, 2 → ch2/sec0, 3 → ch2/sec1
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(core::fmt::Debug)]
+    pub struct Linear;
+
+    impl Variant for Linear {
+        const SLOT: [(usize, usize); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
+    }
+
+    /// Sections swapped within each half (the default): group 0 → ch1/sec1,
+    /// 1 → ch1/sec0, 2 → ch2/sec1, 3 → ch2/sec0.  Verified on hardware.
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(core::fmt::Debug)]
+    pub struct SectionsSwapped;
+
+    impl Variant for SectionsSwapped {
+        const SLOT: [(usize, usize); 4] = [(0, 1), (0, 0), (1, 1), (1, 0)];
+    }
+
+    /// Top and bottom halves exchanged: group 0 → ch2/sec0, 1 → ch2/sec1,
+    /// 2 → ch1/sec0, 3 → ch1/sec1
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(core::fmt::Debug)]
+    pub struct HalvesSwapped;
+
+    impl Variant for HalvesSwapped {
+        const SLOT: [(usize, usize); 4] = [(1, 0), (1, 1), (0, 0), (0, 1)];
+    }
+
+    /// Channel-interleaved groups: group 0 → ch1/sec0, 1 → ch2/sec0,
+    /// 2 → ch1/sec1, 3 → ch2/sec1
+    #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+    #[derive(core::fmt::Debug)]
+    pub struct Alternating;
+
+    impl Variant for Alternating {
+        const SLOT: [(usize, usize); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    }
+}
+
+/// Pixel remapper for "quarter-scan" panels (1/16-scan on 64×64 panels)
+///
+/// Some LED panels — particularly 64×64 modules — use fewer row-address steps
+/// than the row count would suggest.  A 1/16-scan 64×64 panel has only 16 row
+/// addresses (A–D) instead of the 32 a 1/32-scan panel would use, and lights
+/// four rows at a time: rows *n*, *n+16*, *n+32* and *n+48* for address *n*.
+/// To make this work with the two HUB75 data channels, the panel internally
+/// wires each channel's shift register as two side-by-side 64-column
+/// sections, so the physical framebuffer is 2× wider and 2× shorter than the
+/// logical display (32×128 for a 64×64 panel).
+///
+/// The mapping splits the panel into four groups of `PANEL_ROWS / 4`
+/// consecutive rows and places them side by side.  How the four groups are
+/// wired to the four (channel, section) slots varies by driver chip and
+/// manufacturer (FM6126, ICN2037, MBI5153, etc.); the `V` type parameter
+/// selects the wiring — see the [`quarter_scan`] module for the built-in
+/// variants.  The default [`quarter_scan::SectionsSwapped`] (verified on
+/// hardware) maps:
+///
+/// | virtual rows  | channel    | section (framebuffer columns) |
+/// |---------------|------------|-------------------------------|
+/// | `0..16`       | 1 (top)    | 1 (`64..128`)                 |
+/// | `16..32`      | 1 (top)    | 0 (`0..64`)                   |
+/// | `32..48`      | 2 (bottom) | 1 (`64..128`)                 |
+/// | `48..64`      | 2 (bottom) | 0 (`0..64`)                   |
 ///
 /// # Type Parameters
 ///
 /// * `PANEL_ROWS` — Logical row count of the panel (e.g. 64)
 /// * `PANEL_COLS` — Logical column count of the panel (e.g. 64)
+/// * `V` — Group → slot wiring variant (see [`quarter_scan`]); defaults to
+///   [`quarter_scan::SectionsSwapped`]
 ///
 /// # Framebuffer geometry
 ///
 /// The underlying framebuffer must be allocated with:
-/// - rows = `PANEL_ROWS / 4`  (e.g. 16 for a 64-row panel)
-/// - cols = `PANEL_COLS * 4`  (e.g. 256 for a 64-column panel)
+/// - rows = `PANEL_ROWS / 2`  (e.g. 32 for a 64-row panel — 16 addresses × 2 channels)
+/// - cols = `PANEL_COLS * 2`  (e.g. 128 for a 64-column panel — 2 sections per channel)
 ///
-/// [`remap_xy`]: PixelRemapper::remap_xy
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+/// For the bitplane framebuffers this means
+/// `DmaFrameBuffer<{ PANEL_ROWS / 4 }, { PANEL_COLS * 2 }, PLANES>` because
+/// their `NROWS` parameter counts row-address steps (row pairs).
 #[derive(core::fmt::Debug)]
-pub struct QuarterScan<const PANEL_ROWS: usize, const PANEL_COLS: usize> {}
+pub struct QuarterScan<
+    const PANEL_ROWS: usize,
+    const PANEL_COLS: usize,
+    V: quarter_scan::Variant = quarter_scan::SectionsSwapped,
+> {
+    _variant: PhantomData<V>,
+}
 
-impl<const PANEL_ROWS: usize, const PANEL_COLS: usize> PixelRemapper
-    for QuarterScan<PANEL_ROWS, PANEL_COLS>
+#[cfg(feature = "defmt")]
+impl<const PANEL_ROWS: usize, const PANEL_COLS: usize, V: quarter_scan::Variant> defmt::Format
+    for QuarterScan<PANEL_ROWS, PANEL_COLS, V>
+{
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(fmt, "QuarterScan");
+    }
+}
+
+impl<const PANEL_ROWS: usize, const PANEL_COLS: usize, V: quarter_scan::Variant> PixelRemapper
+    for QuarterScan<PANEL_ROWS, PANEL_COLS, V>
 {
     const VIRT_ROWS: usize = PANEL_ROWS;
     const VIRT_COLS: usize = PANEL_COLS;
-    const FB_ROWS: usize = PANEL_ROWS / 4;
-    const FB_COLS: usize = PANEL_COLS * 4;
+    const FB_ROWS: usize = PANEL_ROWS / 2;
+    const FB_COLS: usize = PANEL_COLS * 2;
 
-    fn remap_xy(_x: usize, _y: usize) -> (usize, usize) {
-        todo!("implement for your panel's specific row interleaving pattern")
+    fn remap_xy(x: usize, y: usize) -> (usize, usize) {
+        // Clip points outside the virtual panel: embedded-graphics routinely
+        // generates these (e.g. text with its baseline on the last row has
+        // glyph cells extending below it).  Map them just past the end of
+        // the framebuffer where the inner framebuffer silently discards them.
+        if x >= Self::VIRT_COLS || y >= Self::VIRT_ROWS {
+            return (Self::FB_COLS, Self::FB_ROWS);
+        }
+
+        // Each quarter of the panel (16 consecutive rows on a 64-row panel)
+        // is wired to one 64-column section of the shift register; the
+        // variant's table gives the group → (channel, section) wiring.
+        let group_rows = PANEL_ROWS / 4;
+        let group = y / group_rows;
+        let addr = y % group_rows;
+        let (channel, section) = V::SLOT[group];
+        (section * PANEL_COLS + x, channel * group_rows + addr)
     }
 }
 
@@ -1604,9 +1715,161 @@ mod tests {
         type QS = QuarterScan<64, 64>;
         assert_eq!(QS::VIRT_ROWS, 64);
         assert_eq!(QS::VIRT_COLS, 64);
-        assert_eq!(QS::FB_ROWS, 16);
-        assert_eq!(QS::FB_COLS, 256);
+        assert_eq!(QS::FB_ROWS, 32);
+        assert_eq!(QS::FB_COLS, 128);
         assert_eq!(QS::virtual_size(), (64, 64));
-        assert_eq!(QS::fb_size(), (16, 256));
+        assert_eq!(QS::fb_size(), (32, 128));
+    }
+
+    #[test]
+    fn test_quarter_scan_remap_xy_groups() {
+        type QS = QuarterScan<64, 64>;
+        // group 0 (virtual rows 0..16) → channel 1, section 1
+        assert_eq!(QS::remap_xy(0, 0), (64, 0));
+        assert_eq!(QS::remap_xy(63, 15), (127, 15));
+        // group 1 (virtual rows 16..32) → channel 1, section 0
+        assert_eq!(QS::remap_xy(0, 16), (0, 0));
+        assert_eq!(QS::remap_xy(63, 31), (63, 15));
+        // group 2 (virtual rows 32..48) → channel 2, section 1
+        assert_eq!(QS::remap_xy(0, 32), (64, 16));
+        assert_eq!(QS::remap_xy(63, 47), (127, 31));
+        // group 3 (virtual rows 48..64) → channel 2, section 0
+        assert_eq!(QS::remap_xy(0, 48), (0, 16));
+        assert_eq!(QS::remap_xy(63, 63), (63, 31));
+    }
+
+    #[test]
+    fn test_quarter_scan_remap_out_of_bounds_is_clipped() {
+        type QS = QuarterScan<64, 64>;
+        // points outside the 64×64 virtual panel map just past the inner
+        // framebuffer bounds (128×32) so the inner framebuffer discards them
+        assert_eq!(QS::remap_xy(64, 0), (128, 32));
+        assert_eq!(QS::remap_xy(0, 64), (128, 32));
+        assert_eq!(QS::remap_xy(100, 100), (128, 32));
+        // the last valid pixel is unaffected
+        assert_eq!(QS::remap_xy(63, 63), (63, 31));
+    }
+
+    #[test]
+    fn test_quarter_scan_offscreen_pixels_do_not_panic() {
+        // embedded-graphics generates pixels outside the canvas when drawing
+        // text with its baseline on the last row (6×8 cell extending below
+        // the baseline) — these must be clipped, not panic.
+        use crate::bitplane::plain::DmaFrameBuffer;
+        type InnerFB = DmaFrameBuffer<16, 128, 4>;
+        type Display = RemappedFrameBuffer<InnerFB, QuarterScan<64, 64>>;
+
+        let mut fb = Display::new();
+        for x in 0..70 {
+            for y in 57..70 {
+                fb.set_pixel(Point::new(x, y), Color::WHITE);
+            }
+        }
+    }
+
+    #[test]
+    fn test_quarter_scan_remap_is_bijective_and_in_bounds() {
+        use super::quarter_scan::*;
+        fn check<V: Variant>() {
+            let mut seen = [false; 32 * 128];
+            for y in 0..QuarterScan::<64, 64, V>::VIRT_ROWS {
+                for x in 0..QuarterScan::<64, 64, V>::VIRT_COLS {
+                    let (fb_x, fb_y) = QuarterScan::<64, 64, V>::remap_xy(x, y);
+                    assert!(
+                        fb_x < QuarterScan::<64, 64, V>::FB_COLS,
+                        "fb_x {fb_x} out of bounds"
+                    );
+                    assert!(
+                        fb_y < QuarterScan::<64, 64, V>::FB_ROWS,
+                        "fb_y {fb_y} out of bounds"
+                    );
+                    let idx = fb_y * QuarterScan::<64, 64, V>::FB_COLS + fb_x;
+                    assert!(!seen[idx], "duplicate mapping to ({fb_x}, {fb_y})");
+                    seen[idx] = true;
+                }
+            }
+            // every framebuffer cell is covered exactly once
+            assert!(seen.iter().all(|&s| s));
+        }
+        check::<Linear>();
+        check::<SectionsSwapped>();
+        check::<HalvesSwapped>();
+        check::<Alternating>();
+    }
+
+    #[test]
+    fn test_quarter_scan_variant_tables_are_permutations() {
+        use super::quarter_scan::*;
+        fn assert_permutation<V: Variant>() {
+            let mut seen = [false; 4];
+            for &(channel, section) in V::SLOT.iter() {
+                assert!(channel < 2 && section < 2, "slot out of range");
+                let idx = channel * 2 + section;
+                assert!(!seen[idx], "duplicate slot in variant table");
+                seen[idx] = true;
+            }
+            assert!(
+                seen.iter().all(|&s| s),
+                "variant table must cover all four slots"
+            );
+        }
+        assert_permutation::<Linear>();
+        assert_permutation::<SectionsSwapped>();
+        assert_permutation::<HalvesSwapped>();
+        assert_permutation::<Alternating>();
+    }
+
+    #[test]
+    fn test_quarter_scan_variant_mappings() {
+        use super::quarter_scan::*;
+        // Linear: naive row order
+        assert_eq!(QuarterScan::<64, 64, Linear>::remap_xy(0, 0), (0, 0));
+        assert_eq!(QuarterScan::<64, 64, Linear>::remap_xy(0, 16), (64, 0));
+        assert_eq!(QuarterScan::<64, 64, Linear>::remap_xy(0, 32), (0, 16));
+        assert_eq!(QuarterScan::<64, 64, Linear>::remap_xy(0, 48), (64, 16));
+        // HalvesSwapped: top and bottom halves exchanged
+        assert_eq!(
+            QuarterScan::<64, 64, HalvesSwapped>::remap_xy(0, 0),
+            (0, 16)
+        );
+        assert_eq!(
+            QuarterScan::<64, 64, HalvesSwapped>::remap_xy(0, 16),
+            (64, 16)
+        );
+        assert_eq!(
+            QuarterScan::<64, 64, HalvesSwapped>::remap_xy(0, 32),
+            (0, 0)
+        );
+        assert_eq!(
+            QuarterScan::<64, 64, HalvesSwapped>::remap_xy(0, 48),
+            (64, 0)
+        );
+        // Alternating: channel-interleaved groups
+        assert_eq!(QuarterScan::<64, 64, Alternating>::remap_xy(0, 0), (0, 0));
+        assert_eq!(QuarterScan::<64, 64, Alternating>::remap_xy(0, 16), (0, 16));
+        assert_eq!(QuarterScan::<64, 64, Alternating>::remap_xy(0, 32), (64, 0));
+        assert_eq!(
+            QuarterScan::<64, 64, Alternating>::remap_xy(0, 48),
+            (64, 16)
+        );
+    }
+
+    #[test]
+    fn test_quarter_scan_remap_matches_inner_bitplane_geometry() {
+        // The bitplane DmaFrameBuffer<NROWS, COLS, PLANES> exposes NROWS * 2
+        // rows (one per channel), so a 64x64 1/16-scan panel needs NROWS = 16
+        // (16 addresses) and COLS = 128 (two 64-column sections per channel).
+        use crate::bitplane::plain::DmaFrameBuffer;
+        type QS = QuarterScan<64, 64>;
+        type InnerFB = DmaFrameBuffer<16, 128, 4>;
+        type Display = RemappedFrameBuffer<InnerFB, QS>;
+
+        let mut fb = Display::new();
+        assert_eq!(fb.size(), Size::new(64, 64));
+        // one pixel in each group, verified through the remapped wrapper
+        fb.set_pixel(Point::new(1, 2), Color::RED);
+        fb.set_pixel(Point::new(1, 20), Color::GREEN);
+        fb.set_pixel(Point::new(1, 40), Color::BLUE);
+        fb.set_pixel(Point::new(1, 60), Color::WHITE);
     }
 }
