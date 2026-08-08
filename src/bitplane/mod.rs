@@ -11,7 +11,8 @@
 //! times to bring each plane's total coverage to its bit-weight — halving
 //! the number of DMA transfers per scan with identical brightness. Drivers
 //! should follow the [`FrameBuffer`](crate::FrameBuffer) segment sequence
-//! rather than assuming an order.
+//! rather than assuming an order; see its documentation for the
+//! segment/group/sequence terminology.
 //!
 //! Two variants are provided:
 //!

@@ -14,12 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * The `FrameBuffer` trait's plane-oriented API was replaced by a BCM
   segment API. **Removed:** `plane_count()`, `plane_ptr_len()`, and
   `get_word_size()`. **Added:** required associated constants
-  `BCM_SEGMENT_SHAPES` (one period of `(len, reps)` segment shapes, padded
-  to `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_PERIOD_LEN`, and
-  `BCM_PERIOD_COUNT`, plus a required method
+  `BCM_SEGMENT_SHAPES` (the `(len, reps)` segment shapes of one
+  *sequence* — the repeating unit of the scan — padded to
+  `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_SEQUENCE_LEN`, and
+  `BCM_SEQUENCE_COUNT`, plus a required method
   `bcm_segment(index) -> BcmSegment` (`BcmSegment` is a new public struct
   with `ptr`, `len`, and `reps` fields). `BCM_SEGMENT_COUNT` (default
-  `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`) and `BCM_SEGMENTS_PER_GROUP`
+  `BCM_SEQUENCE_LEN * BCM_SEQUENCE_COUNT`) and `BCM_SEGMENTS_PER_GROUP`
   (default `1`) are optional overrides; `bcm_segment_count()` /
   `bcm_segments_per_group()` are provided methods reading the constants.
 

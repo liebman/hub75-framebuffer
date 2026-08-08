@@ -78,6 +78,10 @@
 //! `2^PLANES - 1` — while the streamed bytes, and therefore the brightness,
 //! are unchanged.
 //!
+//! In [`FrameBuffer`] terms, one row's segments form
+//! one *sequence* — which is also one *group* (a single DMA transfer per
+//! row); one refresh is that sequence repeated `NROWS` times.
+//!
 //! For each row the driver builds descriptors like (no inter-row gap):
 //!
 //! ```text
@@ -182,21 +186,21 @@ const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
     (covered, reps)
 }
 
-/// `(len, reps)` shapes of one BCM scan period (a single row), in scan
+/// `(len, reps)` shapes of one BCM sequence (a single row), in scan
 /// order: one segment per plane (each streaming the contiguous plane suffix
 /// `plane..PLANES`), plus the inter-row gap and end-of-row trailer segments
-/// when enabled. Entries past the period are `(0, 0)` padding.
+/// when enabled. Entries past the sequence are `(0, 0)` padding.
 #[allow(clippy::absurd_extreme_comparisons)]
 const fn segment_shapes<const COLS: usize, const PLANES: usize>(
 ) -> [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] {
     let gap = HAS_GAP as usize;
     let trailer = HAS_TRAILER as usize;
-    let period = PLANES + gap + trailer;
-    assert!(period <= BCM_SEGMENT_SHAPES_CAPACITY);
+    let seq_len = PLANES + gap + trailer;
+    assert!(seq_len <= BCM_SEGMENT_SHAPES_CAPACITY);
     let plane_bytes = COLS * core::mem::size_of::<Entry>();
     let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
     let mut within = 0usize;
-    while within < period {
+    while within < seq_len {
         let shape = if within == 0 {
             let (covered, reps) = plane_seg_shape(0, PLANES);
             (plane_bytes * covered, reps)
@@ -581,9 +585,9 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
     const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] =
         segment_shapes::<COLS, PLANES>();
 
-    const BCM_PERIOD_LEN: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
+    const BCM_SEQUENCE_LEN: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
 
-    const BCM_PERIOD_COUNT: usize = NROWS;
+    const BCM_SEQUENCE_COUNT: usize = NROWS;
 
     const BCM_SEGMENTS_PER_GROUP: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
 
@@ -1470,7 +1474,7 @@ mod tests {
         let fb = TestBuffer::new();
         assert_eq!(
             TestBuffer::BCM_SEGMENT_COUNT,
-            TestBuffer::BCM_PERIOD_LEN * TestBuffer::BCM_PERIOD_COUNT
+            TestBuffer::BCM_SEQUENCE_LEN * TestBuffer::BCM_SEQUENCE_COUNT
         );
         assert_eq!(fb.bcm_segment_count(), TestBuffer::BCM_SEGMENT_COUNT);
         assert_eq!(
@@ -1478,16 +1482,16 @@ mod tests {
             TestBuffer::BCM_SEGMENTS_PER_GROUP
         );
         assert_eq!(
-            TestBuffer::BCM_PERIOD_LEN % TestBuffer::BCM_SEGMENTS_PER_GROUP,
+            TestBuffer::BCM_SEQUENCE_LEN % TestBuffer::BCM_SEGMENTS_PER_GROUP,
             0
         );
         for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
-            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_PERIOD_LEN];
+            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
             assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_PERIOD_LEN..] {
+        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_SEQUENCE_LEN..] {
             assert_eq!((len, reps), (0, 0), "padding must be zero");
         }
     }

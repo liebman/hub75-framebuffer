@@ -612,9 +612,9 @@ impl<
 
     const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
 
-    const BCM_PERIOD_LEN: usize = F::BCM_PERIOD_LEN;
+    const BCM_SEQUENCE_LEN: usize = F::BCM_SEQUENCE_LEN;
 
-    const BCM_PERIOD_COUNT: usize = F::BCM_PERIOD_COUNT;
+    const BCM_SEQUENCE_COUNT: usize = F::BCM_SEQUENCE_COUNT;
 
     const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
@@ -813,9 +813,9 @@ impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M>
 
     const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
 
-    const BCM_PERIOD_LEN: usize = F::BCM_PERIOD_LEN;
+    const BCM_SEQUENCE_LEN: usize = F::BCM_SEQUENCE_LEN;
 
-    const BCM_PERIOD_COUNT: usize = F::BCM_PERIOD_COUNT;
+    const BCM_SEQUENCE_COUNT: usize = F::BCM_SEQUENCE_COUNT;
 
     const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
@@ -1063,9 +1063,9 @@ mod tests {
             shapes
         };
 
-        const BCM_PERIOD_LEN: usize = 1;
+        const BCM_SEQUENCE_LEN: usize = 1;
 
-        const BCM_PERIOD_COUNT: usize = 1;
+        const BCM_SEQUENCE_COUNT: usize = 1;
 
         fn bcm_segment(&self, index: usize) -> BcmSegment {
             assert!(index == 0);

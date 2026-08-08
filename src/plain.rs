@@ -893,9 +893,9 @@ impl<
         shapes
     };
 
-    const BCM_PERIOD_LEN: usize = 1;
+    const BCM_SEQUENCE_LEN: usize = 1;
 
-    const BCM_PERIOD_COUNT: usize = 1;
+    const BCM_SEQUENCE_COUNT: usize = 1;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         assert!(index == 0, "threshold DmaFrameBuffer has only 1 segment");
@@ -2027,17 +2027,17 @@ mod tests {
         let fb = TestFrameBuffer::new();
         assert_eq!(
             TestFrameBuffer::BCM_SEGMENT_COUNT,
-            TestFrameBuffer::BCM_PERIOD_LEN * TestFrameBuffer::BCM_PERIOD_COUNT
+            TestFrameBuffer::BCM_SEQUENCE_LEN * TestFrameBuffer::BCM_SEQUENCE_COUNT
         );
         assert_eq!(fb.bcm_segment_count(), TestFrameBuffer::BCM_SEGMENT_COUNT);
         for i in 0..TestFrameBuffer::BCM_SEGMENT_COUNT {
             let (len, reps) =
-                TestFrameBuffer::BCM_SEGMENT_SHAPES[i % TestFrameBuffer::BCM_PERIOD_LEN];
+                TestFrameBuffer::BCM_SEGMENT_SHAPES[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
             assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_PERIOD_LEN..]
+        for &(len, reps) in &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_SEQUENCE_LEN..]
         {
             assert_eq!((len, reps), (0, 0), "padding must be zero");
         }

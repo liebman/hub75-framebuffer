@@ -22,7 +22,7 @@
 //!    - If the first row pair is being shifted, the panel continues showing the last row pair of the previous frame until the first blank-address-latch sequence occurs.
 //!
 //! ### Brightness and colour depth (Binary Code Modulation)
-//! - Full colour is typically achieved using **Binary Code Modulation (BCM)**, also known as *Bit-Angle Modulation (BAM)*. Each bit-plane is displayed for a period proportional to its binary weight (1, 2, 4, 8 …), yielding 2ⁿ intensity levels per channel. See [Batsocks – LED dimming using Binary Code Modulation](https://www.batsocks.co.uk/readme/art_bcm_1.htm) for a deeper explanation.
+//! - Full colour is typically achieved using **Binary Code Modulation (BCM)**, also known as *Bit-Angle Modulation (BAM)*. Each bit-plane is displayed for a duration proportional to its binary weight (1, 2, 4, 8 …), yielding 2ⁿ intensity levels per channel. See [Batsocks – LED dimming using Binary Code Modulation](https://www.batsocks.co.uk/readme/art_bcm_1.htm) for a deeper explanation.
 //! - Because each LED is on for only a fraction of the total frame time, the driver can use relatively high peak currents without overheating while average brightness is preserved.
 //!
 //! ### Implications for software / hardware drivers
@@ -274,7 +274,7 @@ pub const fn compute_frame_count(bits: u8) -> usize {
 
 /// Capacity of the [`FrameBuffer::BCM_SEGMENT_SHAPES`] array.
 ///
-/// Sized for the worst case scan period: 8 bit-planes plus an inter-row gap
+/// Sized for the worst case sequence: 8 bit-planes plus an inter-row gap
 /// plus an end-of-row trailer.
 pub const BCM_SEGMENT_SHAPES_CAPACITY: usize = 10;
 
@@ -282,7 +282,8 @@ pub const BCM_SEGMENT_SHAPES_CAPACITY: usize = 10;
 ///
 /// The driver walks an ordered sequence of segments, sending each one `reps`
 /// times, to produce correct BCM brightness weighting without needing to know
-/// the framebuffer's internal memory layout.
+/// the framebuffer's internal memory layout. See the [`FrameBuffer`]
+/// documentation for the segment/group/sequence terminology.
 #[derive(Debug, Clone, Copy)]
 pub struct BcmSegment {
     /// Pointer to the segment data.
@@ -295,24 +296,78 @@ pub struct BcmSegment {
 }
 
 /// Framebuffer that exposes its BCM scan sequence as an ordered series of
-/// segments, organized into groups.
+/// segments, organized into repeating sequences and transfer groups.
 ///
-/// The driver transfers all segments within a group as a single unit (for
-/// example, one chained DMA transfer) and synchronizes only at group
-/// boundaries. This allows row-major framebuffers to batch an entire row's
-/// BCM cycle into one transfer, avoiding per-segment synchronization
-/// overhead that can starve other tasks.
+/// # Terminology: segments, groups, sequences
+///
+/// The scan data for one complete panel refresh is described at three
+/// levels, from smallest to largest:
+///
+/// - **Segment** — the atomic unit, a [`BcmSegment`]: `len` bytes at
+///   `ptr`, streamed `reps` times before the driver advances to the next
+///   segment.
+/// - **Group** — [`BCM_SEGMENTS_PER_GROUP`](Self::BCM_SEGMENTS_PER_GROUP)
+///   consecutive segments the driver transfers as a single unit (for
+///   example, one chained DMA transfer). The driver synchronizes —
+///   interrupts, descriptor-table reloads — only at group boundaries.
+///   This lets row-major framebuffers batch an entire row's BCM cycle
+///   into one transfer, avoiding per-segment synchronization overhead
+///   that can starve other tasks.
+/// - **Sequence** — the repeating unit of the scan:
+///   [`BCM_SEQUENCE_LEN`](Self::BCM_SEQUENCE_LEN) consecutive segments
+///   whose `(len, reps)` shapes are given by
+///   [`BCM_SEGMENT_SHAPES`](Self::BCM_SEGMENT_SHAPES). The scan sequence
+///   of one complete panel refresh is this sequence repeated
+///   [`BCM_SEQUENCE_COUNT`](Self::BCM_SEQUENCE_COUNT) times.
+///
+/// ```text
+/// one refresh  = BCM_SEGMENT_COUNT segments
+///              = BCM_SEQUENCE_COUNT repetitions of one sequence
+/// one sequence = BCM_SEQUENCE_LEN segments (shapes: BCM_SEGMENT_SHAPES)
+///              = a whole number of groups (groups never straddle a
+///                sequence boundary)
+/// one group    = BCM_SEGMENTS_PER_GROUP consecutive segments
+/// one segment  = len bytes, streamed reps times
+/// ```
+///
+/// What one sequence (and one group) contains depends on the layout:
+///
+/// | Layout | One sequence is… | `BCM_SEQUENCE_LEN` | `BCM_SEQUENCE_COUNT` | `BCM_SEGMENTS_PER_GROUP` |
+/// |--------|------------------|--------------------|----------------------|--------------------------|
+/// | Frame-major bitplane | the whole frame | `PLANES` | `1` | `1` (each segment is its own group) |
+/// | Row-major bitplane | one row's BCM cycle | `PLANES + has_gap + has_tail` | `NROWS` | `= BCM_SEQUENCE_LEN` (one group per row) |
+/// | Threshold (`plain` / `latched`) | the whole frame | `1` | `1` | `1` |
+///
+/// The sequence level exists so that
+/// [`BCM_SEGMENT_SHAPES`](Self::BCM_SEGMENT_SHAPES) stays small static
+/// data: row-major framebuffers repeat the same per-row segment shapes
+/// `NROWS` times, so the table holds one row's worth of shapes instead of
+/// the whole frame's.
+///
+/// A driver renders one refresh with three nested loops:
+///
+/// ```text
+/// for each sequence in 0..BCM_SEQUENCE_COUNT:
+///     for each group of BCM_SEGMENTS_PER_GROUP segments in the sequence:
+///         start one transfer (e.g. a DMA descriptor chain):
+///             for each segment in the group:
+///                 stream len bytes from ptr, reps times
+///         synchronize at the group boundary
+/// ```
 ///
 /// # Segment Ordering and Grouping
 ///
-/// **Frame-major** (bitplane) framebuffers produce `PLANES` segments with
-/// `segments_per_group = 1` (each segment is its own group). Planes are
-/// **LSB-first** and stored contiguously, so each segment streams a whole
-/// *suffix* of planes: the segment for plane `k` starts at plane `k`,
-/// covers the remaining planes, and is repeated just enough times to bring
-/// plane `k`'s total coverage to `2^k`:
+/// **Frame-major** (bitplane) framebuffers describe the whole frame in a
+/// single sequence of `PLANES` segments (`BCM_SEQUENCE_LEN == PLANES`,
+/// `BCM_SEQUENCE_COUNT == 1`), each segment being its own group
+/// (`BCM_SEGMENTS_PER_GROUP == 1`). Planes are **LSB-first** and stored
+/// contiguously, so each segment streams a whole *suffix* of planes: the
+/// segment for plane `k` starts at plane `k`, covers the remaining planes,
+/// and is repeated just enough times to bring plane `k`'s total coverage
+/// to `2^k`:
 ///
 /// ```text
+/// one sequence (the whole frame) = PLANES single-segment groups:
 /// group 0: (plane0_ptr, PLANES*plane_bytes, 1)      // LSB; all planes
 /// group 1: (plane1_ptr, (PLANES-1)*plane_bytes, 1)
 /// group 2: (plane2_ptr, (PLANES-2)*plane_bytes, 2)
@@ -320,9 +375,10 @@ pub struct BcmSegment {
 /// group N: (planeN_ptr, plane_bytes, 2^(PLANES-2))  // MSB
 /// ```
 ///
-/// **Row-major** framebuffers produce `NROWS × (PLANES + has_gap +
-/// has_tail)` segments with `segments_per_group = PLANES + has_gap +
-/// has_tail` (one group per row). Planes are **LSB-first** within each row
+/// **Row-major** framebuffers repeat one sequence per row: one sequence =
+/// one group = one row's BCM cycle (`BCM_SEQUENCE_LEN ==
+/// BCM_SEGMENTS_PER_GROUP == PLANES + has_gap + has_tail`,
+/// `BCM_SEQUENCE_COUNT == NROWS`). Planes are **LSB-first** within each row
 /// and stored contiguously, so each pixel segment streams a whole *suffix*
 /// of planes: the segment for plane `k` starts at plane `k`, covers the
 /// remaining planes, and is repeated just enough times to bring plane `k`'s
@@ -333,7 +389,7 @@ pub struct BcmSegment {
 /// 2 reps:
 ///
 /// ```text
-/// group 0 (row 0):
+/// sequence 0 (row 0) — one group:
 ///   (row0_plane0_ptr, PLANES*pixel_bytes, 1)        // LSB; whole plane block,
 ///                                                   // or plane 0 only if gap
 ///   (row0_gap_ptr, gap_bytes, 1)                    // inter-row gap, if enabled
@@ -342,29 +398,24 @@ pub struct BcmSegment {
 ///   …
 ///   (row0_planeN_ptr, pixel_bytes, 2^(PLANES-2))    // MSB
 ///   (row0_trailer_ptr, trailer_bytes, 1)            // tail, if enabled
-/// group 1 (row 1):
+/// sequence 1 (row 1) — one group:
 ///   (row1_plane0_ptr, PLANES*pixel_bytes, 1)
 ///   …
 /// ```
 ///
 /// **Threshold-based** (deprecated) framebuffers produce a single segment
-/// with `reps = 1` covering the entire buffer.
+/// with `reps = 1` covering the entire buffer (`BCM_SEQUENCE_LEN ==
+/// BCM_SEQUENCE_COUNT == BCM_SEGMENTS_PER_GROUP == 1`).
 pub trait FrameBuffer {
     /// The DMA word type used by this framebuffer (`u8` for latched, `u16`
-    /// for direct-drive). The driver uses this to enforce that pin
+    /// for direct-drive). Driver implementations can use this to enforce that pin
     /// configurations match the framebuffer at compile time.
     type Word;
 
-    /// `(len, reps)` shapes of one **period** of the BCM scan sequence, in
-    /// scan order.
-    ///
-    /// The scan sequence of a complete panel refresh is this period repeated
-    /// [`BCM_PERIOD_COUNT`](Self::BCM_PERIOD_COUNT) times:
-    ///
-    /// - **Row-major** framebuffers have one period per row
-    ///   (`BCM_PERIOD_COUNT == NROWS`).
-    /// - **Frame-major** and threshold framebuffers describe the whole frame
-    ///   in a single period (`BCM_PERIOD_COUNT == 1`).
+    /// `(len, reps)` shapes of the segments of one **sequence**, in scan
+    /// order — see the trait-level [terminology
+    /// section](#terminology-segments-groups-sequences) for the
+    /// segment/group/sequence hierarchy.
     ///
     /// This is static, instance-free data: `len` is the byte length of a
     /// segment and `reps` is how many times it is streamed before advancing
@@ -372,45 +423,41 @@ pub trait FrameBuffer {
     /// resources (for example DMA descriptor tables) without needing a
     /// framebuffer instance.
     ///
-    /// Only the first [`BCM_PERIOD_LEN`](Self::BCM_PERIOD_LEN) entries are
+    /// Only the first [`BCM_SEQUENCE_LEN`](Self::BCM_SEQUENCE_LEN) entries are
     /// meaningful; the remaining entries are `(0, 0)` padding (stable Rust
     /// does not allow the array length to be computed from the
     /// implementor's const generics).
     ///
     /// The `(len, reps)` of the segment returned by
     /// [`bcm_segment`](Self::bcm_segment) for index `i` must equal
-    /// `BCM_SEGMENT_SHAPES[i % BCM_PERIOD_LEN]`.
+    /// `BCM_SEGMENT_SHAPES[i % BCM_SEQUENCE_LEN]`.
     const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY];
 
-    /// Number of meaningful entries in
-    /// [`BCM_SEGMENT_SHAPES`](Self::BCM_SEGMENT_SHAPES), i.e. the number of
-    /// BCM segments in one period of the scan sequence.
-    ///
-    /// [`BCM_SEGMENTS_PER_GROUP`](Self::BCM_SEGMENTS_PER_GROUP) must divide
-    /// this value (groups never straddle a period boundary).
-    const BCM_PERIOD_LEN: usize;
+    /// Number of BCM segments in one **sequence**, i.e. the number of
+    /// meaningful entries in
+    /// [`BCM_SEGMENT_SHAPES`](Self::BCM_SEGMENT_SHAPES).
+    const BCM_SEQUENCE_LEN: usize;
 
-    /// Number of times the period repeats in one complete panel refresh.
-    const BCM_PERIOD_COUNT: usize;
+    /// Number of times the sequence repeats in one complete panel refresh:
+    /// `NROWS` for **row-major** framebuffers (one sequence per row), `1`
+    /// for **frame-major** and threshold framebuffers (the sequence covers
+    /// the whole frame).
+    const BCM_SEQUENCE_COUNT: usize;
 
     /// Total number of BCM segments streamed for one complete panel
     /// refresh (all rows, all planes).
     ///
-    /// For **row-major** framebuffers this is
-    /// `NROWS * BCM_SEGMENTS_PER_GROUP` (one group per row); for
-    /// **frame-major** framebuffers it equals `PLANES` with
-    /// `BCM_SEGMENTS_PER_GROUP == 1`.
-    ///
     /// The default implementation is
-    /// `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`.
-    const BCM_SEGMENT_COUNT: usize = Self::BCM_PERIOD_LEN * Self::BCM_PERIOD_COUNT;
+    /// `BCM_SEQUENCE_LEN * BCM_SEQUENCE_COUNT`.
+    const BCM_SEGMENT_COUNT: usize = Self::BCM_SEQUENCE_LEN * Self::BCM_SEQUENCE_COUNT;
 
-    /// Number of consecutive segments that form one transfer group.
+    /// Number of consecutive segments that form one transfer **group**.
     ///
     /// The driver transfers all segments within a group as a single unit
     /// (for example, one chained DMA transfer) and synchronizes only at
-    /// group boundaries. [`BCM_PERIOD_LEN`](Self::BCM_PERIOD_LEN) must be
-    /// divisible by this value.
+    /// group boundaries. Must divide
+    /// [`BCM_SEQUENCE_LEN`](Self::BCM_SEQUENCE_LEN): groups never straddle
+    /// a sequence boundary.
     ///
     /// - **Frame-major** framebuffers use `1` (each plane is its own group).
     /// - **Row-major** framebuffers use `PLANES + has_gap + has_tail` (all
@@ -418,7 +465,7 @@ pub trait FrameBuffer {
     const BCM_SEGMENTS_PER_GROUP: usize = 1;
 
     /// Total number of BCM segments streamed for one complete panel
-    /// refresh (all rows, all planes).
+    /// refresh.
     ///
     /// The default implementation returns [`Self::BCM_SEGMENT_COUNT`].
     fn bcm_segment_count(&self) -> usize {
@@ -430,7 +477,7 @@ pub trait FrameBuffer {
     /// Segments are ordered for correct display: the driver sends
     /// segment 0 first (repeated `reps` times), then segment 1, etc.
     /// The `(len, reps)` of the returned segment must match
-    /// `Self::BCM_SEGMENT_SHAPES[index % Self::BCM_PERIOD_LEN]`.
+    /// `Self::BCM_SEGMENT_SHAPES[index % Self::BCM_SEQUENCE_LEN]`.
     ///
     /// # Panics
     /// Panics if `index >= bcm_segment_count()`.
