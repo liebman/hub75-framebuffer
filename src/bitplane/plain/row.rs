@@ -109,7 +109,7 @@ use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
-use crate::{BcmSegment, FrameBuffer};
+use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 use super::{
@@ -180,6 +180,38 @@ const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
         1 << (plane_idx - 1)
     };
     (covered, reps)
+}
+
+/// `(len, reps)` shapes of one BCM scan period (a single row), in scan
+/// order: one segment per plane (each streaming the contiguous plane suffix
+/// `plane..PLANES`), plus the inter-row gap and end-of-row trailer segments
+/// when enabled. Entries past the period are `(0, 0)` padding.
+#[allow(clippy::absurd_extreme_comparisons)]
+const fn segment_shapes<const COLS: usize, const PLANES: usize>(
+) -> [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] {
+    let gap = HAS_GAP as usize;
+    let trailer = HAS_TRAILER as usize;
+    let period = PLANES + gap + trailer;
+    assert!(period <= BCM_SEGMENT_SHAPES_CAPACITY);
+    let plane_bytes = COLS * core::mem::size_of::<Entry>();
+    let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
+    let mut within = 0usize;
+    while within < period {
+        let shape = if within == 0 {
+            let (covered, reps) = plane_seg_shape(0, PLANES);
+            (plane_bytes * covered, reps)
+        } else if HAS_GAP && within == 1 {
+            (GAP_BYTES, 1)
+        } else if within < PLANES + gap {
+            let (covered, reps) = plane_seg_shape(within - gap, PLANES);
+            (plane_bytes * covered, reps)
+        } else {
+            (TRAILER_BYTES, 1)
+        };
+        shapes[within] = shape;
+        within += 1;
+    }
+    shapes
 }
 
 /// Builds a per-plane pixel template for the row-major layout.
@@ -350,7 +382,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         instance
     }
 
-    /// Number of bit-planes (for DMA descriptor count calculation).
+    /// Number of bit-planes.
     #[must_use]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
@@ -372,39 +404,6 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     #[must_use]
     pub const fn bcm_row_bytes() -> usize {
         GAP_BYTES + TRAILER_BYTES
-    }
-
-    /// Computes the number of DMA descriptors required for this framebuffer.
-    ///
-    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
-    ///
-    /// One descriptor chain per BCM segment repetition (a segment spanning
-    /// several planes may itself need multiple descriptors when it exceeds
-    /// `max_chunk`), plus one per inter-row gap and end-of-row trailer
-    /// segment.
-    #[must_use]
-    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
-        let plane_bytes = COLS * core::mem::size_of::<Entry>();
-        let mut descs_per_pixel = 0usize;
-        let mut plane = 0usize;
-        while plane < PLANES {
-            let (covered, reps) = plane_seg_shape(plane, PLANES);
-            descs_per_pixel += (plane_bytes * covered).div_ceil(max_chunk) * reps;
-            plane += 1;
-        }
-        #[allow(clippy::absurd_extreme_comparisons)]
-        let descs_per_gap = if GAP_BYTES > 0 {
-            GAP_BYTES.div_ceil(max_chunk)
-        } else {
-            0
-        };
-        #[allow(clippy::absurd_extreme_comparisons)]
-        let descs_per_trailer = if TRAILER_BYTES > 0 {
-            TRAILER_BYTES.div_ceil(max_chunk)
-        } else {
-            0
-        };
-        NROWS * (descs_per_pixel + descs_per_gap + descs_per_trailer)
     }
 
     /// Formats the framebuffer with row addresses and control bits.
@@ -579,11 +578,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u16;
 
-    fn bcm_segment_count(&self) -> usize {
-        let gap = usize::from(HAS_GAP);
-        let trailer = usize::from(HAS_TRAILER);
-        NROWS * (PLANES + gap + trailer)
-    }
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] =
+        segment_shapes::<COLS, PLANES>();
+
+    const BCM_PERIOD_LEN: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
+
+    const BCM_PERIOD_COUNT: usize = NROWS;
+
+    const BCM_SEGMENTS_PER_GROUP: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         let gap = usize::from(HAS_GAP);
@@ -627,12 +629,6 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
             let (ptr, len) = self.trailer_ptr_len(row_idx);
             BcmSegment { ptr, len, reps: 1 }
         }
-    }
-
-    fn bcm_segments_per_group(&self) -> usize {
-        let gap = usize::from(HAS_GAP);
-        let trailer = usize::from(HAS_TRAILER);
-        PLANES + gap + trailer
     }
 }
 
@@ -1469,55 +1465,31 @@ mod tests {
     }
 
     #[test]
-    fn dma_descriptor_count_matches_expected() {
-        // Every coalesced segment for this geometry fits in a single
-        // descriptor, so the descriptor count equals the per-row transfer
-        // count times the number of rows.
-        let max_chunk = 4092;
-        let pixel_transfers = if HAS_GAP {
-            (1 << (TEST_PLANES - 1)) + 1
-        } else {
-            1 << (TEST_PLANES - 1)
-        };
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        let expected = 16 * (pixel_transfers + gap + trailer);
-        assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
-    }
-
-    #[test]
-    fn dma_descriptor_count_chunks_oversized_segments() {
-        // With a tiny max_chunk every coalesced segment is split into
-        // per-plane-sized descriptors.
-        let plane_bytes = TEST_COLS * core::mem::size_of::<Entry>();
-        let mut pixel_descs = 0;
-        for plane in 0..TEST_PLANES {
-            let covered = if HAS_GAP && plane == 0 {
-                1
-            } else {
-                TEST_PLANES - plane
-            };
-            let reps = if plane == 0 {
-                1
-            } else if HAS_GAP && plane == 1 {
-                2
-            } else {
-                1 << (plane - 1)
-            };
-            pixel_descs += covered * reps;
+    fn bcm_segment_shapes_match_runtime_segments() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        assert_eq!(
+            TestBuffer::BCM_SEGMENT_COUNT,
+            TestBuffer::BCM_PERIOD_LEN * TestBuffer::BCM_PERIOD_COUNT
+        );
+        assert_eq!(fb.bcm_segment_count(), TestBuffer::BCM_SEGMENT_COUNT);
+        assert_eq!(
+            fb.bcm_segments_per_group(),
+            TestBuffer::BCM_SEGMENTS_PER_GROUP
+        );
+        assert_eq!(
+            TestBuffer::BCM_PERIOD_LEN % TestBuffer::BCM_SEGMENTS_PER_GROUP,
+            0
+        );
+        for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
+            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_PERIOD_LEN];
+            let seg = fb.bcm_segment(i);
+            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        let gap = if HAS_GAP {
-            GAP_BYTES.div_ceil(plane_bytes)
-        } else {
-            0
-        };
-        let trailer = if HAS_TRAILER {
-            TRAILER_BYTES.div_ceil(plane_bytes)
-        } else {
-            0
-        };
-        let expected = 16 * (pixel_descs + gap + trailer);
-        assert_eq!(TestBuffer::dma_descriptor_count(plane_bytes), expected);
+        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_PERIOD_LEN..] {
+            assert_eq!((len, reps), (0, 0), "padding must be zero");
+        }
     }
 
     #[test]

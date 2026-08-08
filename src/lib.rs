@@ -272,14 +272,20 @@ pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
 }
 
-/// A single DMA segment in the BCM scan sequence.
+/// Capacity of the [`FrameBuffer::BCM_SEGMENT_SHAPES`] array.
+///
+/// Sized for the worst case scan period: 8 bit-planes plus an inter-row gap
+/// plus an end-of-row trailer.
+pub const BCM_SEGMENT_SHAPES_CAPACITY: usize = 10;
+
+/// A single segment of the BCM scan sequence.
 ///
 /// The driver walks an ordered sequence of segments, sending each one `reps`
 /// times, to produce correct BCM brightness weighting without needing to know
 /// the framebuffer's internal memory layout.
 #[derive(Debug, Clone, Copy)]
 pub struct BcmSegment {
-    /// Pointer to DMA-ready data.
+    /// Pointer to the segment data.
     pub ptr: *const u8,
     /// Byte length of this segment.
     pub len: usize,
@@ -289,12 +295,13 @@ pub struct BcmSegment {
 }
 
 /// Framebuffer that exposes its BCM scan sequence as an ordered series of
-/// DMA segments, organized into groups.
+/// segments, organized into groups.
 ///
-/// The driver chains all segments within a group into a single DMA transfer
-/// and fires the ISR only at group boundaries. This allows row-major
-/// framebuffers to batch an entire row's BCM cycle into one transfer,
-/// avoiding per-segment ISR overhead that can starve other tasks.
+/// The driver transfers all segments within a group as a single unit (for
+/// example, one chained DMA transfer) and synchronizes only at group
+/// boundaries. This allows row-major framebuffers to batch an entire row's
+/// BCM cycle into one transfer, avoiding per-segment synchronization
+/// overhead that can starve other tasks.
 ///
 /// # Segment Ordering and Grouping
 ///
@@ -348,31 +355,93 @@ pub trait FrameBuffer {
     /// configurations match the framebuffer at compile time.
     type Word;
 
-    /// Total number of BCM segments in one complete frame scan.
-    fn bcm_segment_count(&self) -> usize;
+    /// `(len, reps)` shapes of one **period** of the BCM scan sequence, in
+    /// scan order.
+    ///
+    /// The scan sequence of a complete panel refresh is this period repeated
+    /// [`BCM_PERIOD_COUNT`](Self::BCM_PERIOD_COUNT) times:
+    ///
+    /// - **Row-major** framebuffers have one period per row
+    ///   (`BCM_PERIOD_COUNT == NROWS`).
+    /// - **Frame-major** and threshold framebuffers describe the whole frame
+    ///   in a single period (`BCM_PERIOD_COUNT == 1`).
+    ///
+    /// This is static, instance-free data: `len` is the byte length of a
+    /// segment and `reps` is how many times it is streamed before advancing
+    /// to the next one. Drivers can use it at compile time to size transfer
+    /// resources (for example DMA descriptor tables) without needing a
+    /// framebuffer instance.
+    ///
+    /// Only the first [`BCM_PERIOD_LEN`](Self::BCM_PERIOD_LEN) entries are
+    /// meaningful; the remaining entries are `(0, 0)` padding (stable Rust
+    /// does not allow the array length to be computed from the
+    /// implementor's const generics).
+    ///
+    /// The `(len, reps)` of the segment returned by
+    /// [`bcm_segment`](Self::bcm_segment) for index `i` must equal
+    /// `BCM_SEGMENT_SHAPES[i % BCM_PERIOD_LEN]`.
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY];
+
+    /// Number of meaningful entries in
+    /// [`BCM_SEGMENT_SHAPES`](Self::BCM_SEGMENT_SHAPES), i.e. the number of
+    /// BCM segments in one period of the scan sequence.
+    ///
+    /// [`BCM_SEGMENTS_PER_GROUP`](Self::BCM_SEGMENTS_PER_GROUP) must divide
+    /// this value (groups never straddle a period boundary).
+    const BCM_PERIOD_LEN: usize;
+
+    /// Number of times the period repeats in one complete panel refresh.
+    const BCM_PERIOD_COUNT: usize;
+
+    /// Total number of BCM segments streamed for one complete panel
+    /// refresh (all rows, all planes).
+    ///
+    /// For **row-major** framebuffers this is
+    /// `NROWS * BCM_SEGMENTS_PER_GROUP` (one group per row); for
+    /// **frame-major** framebuffers it equals `PLANES` with
+    /// `BCM_SEGMENTS_PER_GROUP == 1`.
+    ///
+    /// The default implementation is
+    /// `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`.
+    const BCM_SEGMENT_COUNT: usize = Self::BCM_PERIOD_LEN * Self::BCM_PERIOD_COUNT;
+
+    /// Number of consecutive segments that form one transfer group.
+    ///
+    /// The driver transfers all segments within a group as a single unit
+    /// (for example, one chained DMA transfer) and synchronizes only at
+    /// group boundaries. [`BCM_PERIOD_LEN`](Self::BCM_PERIOD_LEN) must be
+    /// divisible by this value.
+    ///
+    /// - **Frame-major** framebuffers use `1` (each plane is its own group).
+    /// - **Row-major** framebuffers use `PLANES + has_gap + has_tail` (all
+    ///   segments for one row form a single transfer).
+    const BCM_SEGMENTS_PER_GROUP: usize = 1;
+
+    /// Total number of BCM segments streamed for one complete panel
+    /// refresh (all rows, all planes).
+    ///
+    /// The default implementation returns [`Self::BCM_SEGMENT_COUNT`].
+    fn bcm_segment_count(&self) -> usize {
+        Self::BCM_SEGMENT_COUNT
+    }
 
     /// Returns the i-th BCM segment.
     ///
     /// Segments are ordered for correct display: the driver sends
     /// segment 0 first (repeated `reps` times), then segment 1, etc.
+    /// The `(len, reps)` of the returned segment must match
+    /// `Self::BCM_SEGMENT_SHAPES[index % Self::BCM_PERIOD_LEN]`.
     ///
     /// # Panics
     /// Panics if `index >= bcm_segment_count()`.
     fn bcm_segment(&self, index: usize) -> BcmSegment;
 
-    /// Number of consecutive segments that form one DMA transfer group.
+    /// Number of consecutive segments that form one transfer group.
     ///
-    /// The driver chains all segments within a group into a single DMA
-    /// descriptor chain and fires the ISR only at group boundaries.
-    /// `bcm_segment_count()` must be divisible by this value.
-    ///
-    /// - **Frame-major** framebuffers return `1` (each plane is its own group).
-    /// - **Row-major** framebuffers return `PLANES + has_gap + has_tail` (all
-    ///   segments for one row are linked into a single DMA transfer).
-    ///
-    /// Defaults to `1` for backward compatibility.
+    /// The default implementation returns
+    /// [`Self::BCM_SEGMENTS_PER_GROUP`].
     fn bcm_segments_per_group(&self) -> usize {
-        1
+        Self::BCM_SEGMENTS_PER_GROUP
     }
 }
 

@@ -172,7 +172,9 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 use core::convert::Infallible;
 
 use super::Color;
-use crate::{BcmSegment, FrameBuffer, FrameBufferOperations, MutableFrameBuffer};
+use crate::{
+    BcmSegment, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY,
+};
 use bitfield::bitfield;
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
@@ -638,15 +640,6 @@ impl<
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
 
-    /// Computes the number of DMA descriptors required for this framebuffer.
-    ///
-    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
-    #[must_use]
-    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
-        let total_bytes = core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>();
-        total_bytes.div_ceil(max_chunk)
-    }
-
     /// Format the framebuffer, setting up all control bits and clearing pixel data.
     /// This method does a full format of all control bits and clears all pixel data.
     /// Normally you don't need to call this as `new()` automatically formats the framebuffer.
@@ -917,9 +910,18 @@ impl<
 {
     type Word = u8;
 
-    fn bcm_segment_count(&self) -> usize {
-        1
-    }
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = {
+        let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
+        shapes[0] = (
+            core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>(),
+            1,
+        );
+        shapes
+    };
+
+    const BCM_PERIOD_LEN: usize = 1;
+
+    const BCM_PERIOD_COUNT: usize = 1;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         assert!(index == 0, "threshold DmaFrameBuffer has only 1 segment");
@@ -2141,11 +2143,24 @@ mod tests {
     }
 
     #[test]
-    fn dma_descriptor_count_matches_expected() {
-        let total_bytes =
-            core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
-        let max_chunk = 4092;
-        let expected = total_bytes.div_ceil(max_chunk);
-        assert_eq!(TestFrameBuffer::dma_descriptor_count(max_chunk), expected);
+    fn bcm_segment_shapes_match_runtime_segments() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        assert_eq!(
+            TestFrameBuffer::BCM_SEGMENT_COUNT,
+            TestFrameBuffer::BCM_PERIOD_LEN * TestFrameBuffer::BCM_PERIOD_COUNT
+        );
+        assert_eq!(fb.bcm_segment_count(), TestFrameBuffer::BCM_SEGMENT_COUNT);
+        for i in 0..TestFrameBuffer::BCM_SEGMENT_COUNT {
+            let (len, reps) =
+                TestFrameBuffer::BCM_SEGMENT_SHAPES[i % TestFrameBuffer::BCM_PERIOD_LEN];
+            let seg = fb.bcm_segment(i);
+            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
+        }
+        for &(len, reps) in &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_PERIOD_LEN..]
+        {
+            assert_eq!((len, reps), (0, 0), "padding must be zero");
+        }
     }
 }

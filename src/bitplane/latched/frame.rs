@@ -35,7 +35,7 @@ use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use super::{make_data_template, map_index, Address, Entry, ADDR_TABLE, INTER_ROW_BLANK, OE_BLANK};
 use crate::Color;
-use crate::{BcmSegment, FrameBuffer};
+use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -118,6 +118,23 @@ const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
     (covered, reps)
 }
 
+/// `(len, reps)` shapes of the BCM scan period, in scan order: one segment
+/// per plane, each streaming the contiguous plane suffix `plane..PLANES`.
+/// Entries past `PLANES` are `(0, 0)` padding.
+const fn segment_shapes<const NROWS: usize, const COLS: usize, const PLANES: usize>(
+) -> [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] {
+    assert!(PLANES <= BCM_SEGMENT_SHAPES_CAPACITY);
+    let plane_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
+    let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
+    let mut plane = 0usize;
+    while plane < PLANES {
+        let (covered, reps) = plane_seg_shape(plane, PLANES);
+        shapes[plane] = (plane_bytes * covered, reps);
+        plane += 1;
+    }
+    shapes
+}
+
 /// The entire BCM Frame Buffer (Contiguous Memory)
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -155,26 +172,6 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     #[must_use]
     pub const fn bcm_chunk_bytes() -> usize {
         NROWS * core::mem::size_of::<Row<COLS>>()
-    }
-
-    /// Computes the number of DMA descriptors required for this framebuffer.
-    ///
-    /// `max_chunk` is the platform-specific maximum DMA transfer size in bytes.
-    ///
-    /// One descriptor chain per BCM segment repetition; a segment spanning
-    /// several planes may itself need multiple descriptors when it exceeds
-    /// `max_chunk`.
-    #[must_use]
-    pub const fn dma_descriptor_count(max_chunk: usize) -> usize {
-        let plane_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
-        let mut descs = 0usize;
-        let mut plane = 0usize;
-        while plane < PLANES {
-            let (covered, reps) = plane_seg_shape(plane, PLANES);
-            descs += (plane_bytes * covered).div_ceil(max_chunk) * reps;
-            plane += 1;
-        }
-        descs
     }
 
     /// Returns the number of rows per plane for row-based BCM.
@@ -294,9 +291,12 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u8;
 
-    fn bcm_segment_count(&self) -> usize {
-        PLANES
-    }
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] =
+        segment_shapes::<NROWS, COLS, PLANES>();
+
+    const BCM_PERIOD_LEN: usize = PLANES;
+
+    const BCM_PERIOD_COUNT: usize = 1;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         assert!(
@@ -783,29 +783,30 @@ mod tests {
     }
 
     #[test]
-    fn dma_descriptor_count_matches_expected() {
-        let plane_bytes = 16 * core::mem::size_of::<Row<TEST_COLS>>();
-        let max_chunk = 4092;
-        let mut expected = 0;
-        for plane in 0..8usize {
-            let covered = 8 - plane;
-            let reps = if plane == 0 { 1 } else { 1 << (plane - 1) };
-            expected += (plane_bytes * covered).div_ceil(max_chunk) * reps;
+    fn bcm_segment_shapes_match_runtime_segments() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        assert_eq!(
+            TestBuffer::BCM_SEGMENT_COUNT,
+            TestBuffer::BCM_PERIOD_LEN * TestBuffer::BCM_PERIOD_COUNT
+        );
+        assert_eq!(fb.bcm_segment_count(), TestBuffer::BCM_SEGMENT_COUNT);
+        assert_eq!(
+            fb.bcm_segments_per_group(),
+            TestBuffer::BCM_SEGMENTS_PER_GROUP
+        );
+        assert_eq!(
+            TestBuffer::BCM_PERIOD_LEN % TestBuffer::BCM_SEGMENTS_PER_GROUP,
+            0
+        );
+        for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
+            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_PERIOD_LEN];
+            let seg = fb.bcm_segment(i);
+            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        assert_eq!(TestBuffer::dma_descriptor_count(max_chunk), expected);
-    }
-
-    #[test]
-    fn dma_descriptor_count_chunks_oversized_segments() {
-        // With a tiny max_chunk every coalesced segment is split into
-        // per-plane-sized descriptors.
-        let plane_bytes = 16 * core::mem::size_of::<Row<TEST_COLS>>();
-        let mut expected = 0;
-        for plane in 0..8usize {
-            let covered = 8 - plane;
-            let reps = if plane == 0 { 1 } else { 1 << (plane - 1) };
-            expected += covered * reps;
+        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_PERIOD_LEN..] {
+            assert_eq!((len, reps), (0, 0), "padding must be zero");
         }
-        assert_eq!(TestBuffer::dma_descriptor_count(plane_bytes), expected);
     }
 }

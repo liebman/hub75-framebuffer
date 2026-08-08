@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### ⚠️ Breaking
+
+* The `FrameBuffer` trait now describes its BCM scan sequence as static,
+  instance-free data via new associated constants: `BCM_SEGMENT_SHAPES`
+  (one period of `(len, reps)` segment shapes, padded to
+  `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_PERIOD_LEN`, and
+  `BCM_PERIOD_COUNT`. `BCM_SEGMENT_COUNT` defaults to
+  `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`, and `bcm_segment_count()` /
+  `bcm_segments_per_group()` are now provided methods reading the
+  constants. Downstream `FrameBuffer` implementors must add the new
+  constants; the method overrides can be removed.
+
+* `tiling::QuarterScan` gained a wiring-variant type parameter
+  (`QuarterScan<ROWS, COLS, V = quarter_scan::SectionsSwapped>`) and is no
+  longer value-constructible (private `PhantomData` field). Type-level usage
+  such as `QuarterScan<64, 64>` is source-compatible.
+
+* **`bitplane::latched::Row` moved to `bitplane::latched::frame::Row`** as part
+  of the module split. The `bitplane::latched::DmaFrameBuffer` path is
+  unchanged via re-export.
+
+* **Bitplane plane-major framebuffers now store planes LSB-first and emit
+  suffix-coalesced BCM segments** (`bitplane::plain::frame::DmaFrameBuffer`
+  and `bitplane::latched::frame::DmaFrameBuffer`). Plane 0 now carries the
+  LSB (previously the MSB), and the segment for plane `k` spans planes
+  `k..PLANES` with `2^(k-1)` repetitions (segment 0 spans all planes with 1
+  repetition), halving the number of DMA transfers per frame (`2^(PLANES-1)`
+  instead of `2^PLANES - 1`) with identical brightness. `bcm_segment_count()`
+  and `bcm_segments_per_group()` are unchanged, but segment `len`/`reps`
+  values changed.
+
+  **Migration:** drivers must no longer assume one segment == one plane: a
+  segment's `len` may exceed the platform's maximum DMA transfer size, so
+  split each repetition into `div_ceil(len, max_chunk)` descriptors
+  (`dma_descriptor_count(max_chunk)` now accounts for this). Per-group ISR
+  cadence is unchanged (`PLANES` groups per frame), but inter-ISR intervals
+  changed, and the longest contiguous single-plane (MSB) run per frame is
+  now `2^(PLANES-2)` plane passes.
+
 ### Added
 
 * `lead-blank-32` and `trail-blank-32` features extending blanking delay options to 32 pixel-clock cycles.
@@ -67,46 +106,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Coordinates outside the virtual canvas are clipped (mapped just past the
   inner framebuffer's bounds) instead of panicking, matching the clipping
   behavior embedded-graphics draw operations rely on.
-
-### ⚠️ Breaking
-
-* `tiling::QuarterScan` gained a wiring-variant type parameter
-  (`QuarterScan<ROWS, COLS, V = quarter_scan::SectionsSwapped>`) and is no
-  longer value-constructible (private `PhantomData` field). Type-level usage
-  such as `QuarterScan<64, 64>` is source-compatible.
-
-* **`FrameBuffer` trait now exposes BCM segments instead of raw plane
-  pointers.** The old methods `get_word_size()`, `plane_count()`, and
-  `plane_ptr_len()` have been replaced with `bcm_segment_count()`,
-  `bcm_segment()`, and `bcm_segments_per_group()`. The `Word` associated type
-  is retained. All built-in framebuffers and tiling wrappers implement the new
-  interface.
-
-  **Migration:** if you implemented `FrameBuffer` on a custom type, replace
-  `plane_count` / `plane_ptr_len` with the segment methods. Each former plane
-  becomes one `BcmSegment { ptr, len, reps }`.
-
-* **`bitplane::latched::Row` moved to `bitplane::latched::frame::Row`** as part
-  of the module split. The `bitplane::latched::DmaFrameBuffer` path is
-  unchanged via re-export.
-
-* **Bitplane plane-major framebuffers now store planes LSB-first and emit
-  suffix-coalesced BCM segments** (`bitplane::plain::frame::DmaFrameBuffer`
-  and `bitplane::latched::frame::DmaFrameBuffer`). Plane 0 now carries the
-  LSB (previously the MSB), and the segment for plane `k` spans planes
-  `k..PLANES` with `2^(k-1)` repetitions (segment 0 spans all planes with 1
-  repetition), halving the number of DMA transfers per frame (`2^(PLANES-1)`
-  instead of `2^PLANES - 1`) with identical brightness. `bcm_segment_count()`
-  and `bcm_segments_per_group()` are unchanged, but segment `len`/`reps`
-  values changed.
-
-  **Migration:** drivers must no longer assume one segment == one plane: a
-  segment's `len` may exceed the platform's maximum DMA transfer size, so
-  split each repetition into `div_ceil(len, max_chunk)` descriptors
-  (`dma_descriptor_count(max_chunk)` now accounts for this). Per-group ISR
-  cadence is unchanged (`PLANES` groups per frame), but inter-ISR intervals
-  changed, and the longest contiguous single-plane (MSB) run per frame is
-  now `2^(PLANES-2)` plane passes.
 
 ## [0.11.0] - 2026-08-02
 

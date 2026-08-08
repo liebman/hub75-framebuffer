@@ -15,7 +15,10 @@
 
 use core::{convert::Infallible, marker::PhantomData};
 
-use crate::{BcmSegment, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer};
+use crate::{
+    BcmSegment, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer,
+    BCM_SEGMENT_SHAPES_CAPACITY,
+};
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
 
@@ -153,7 +156,7 @@ impl<
     }
 }
 
-/// Slot-assignment variants for [`QuarterScan`](crate::tiling::QuarterScan) panels
+/// Slot-assignment variants for [`QuarterScan`] panels
 ///
 /// A quarter-scan panel's four row groups can be wired to the four
 /// (channel, section) slots of the shift register in different orders
@@ -607,16 +610,16 @@ impl<
 {
     type Word = F::Word;
 
-    fn bcm_segment_count(&self) -> usize {
-        self.0.bcm_segment_count()
-    }
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
+
+    const BCM_PERIOD_LEN: usize = F::BCM_PERIOD_LEN;
+
+    const BCM_PERIOD_COUNT: usize = F::BCM_PERIOD_COUNT;
+
+    const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         self.0.bcm_segment(index)
-    }
-
-    fn bcm_segments_per_group(&self) -> usize {
-        self.0.bcm_segments_per_group()
     }
 }
 
@@ -808,16 +811,16 @@ unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for Remappe
 impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M> {
     type Word = F::Word;
 
-    fn bcm_segment_count(&self) -> usize {
-        self.0.bcm_segment_count()
-    }
+    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
+
+    const BCM_PERIOD_LEN: usize = F::BCM_PERIOD_LEN;
+
+    const BCM_PERIOD_COUNT: usize = F::BCM_PERIOD_COUNT;
+
+    const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
     fn bcm_segment(&self, index: usize) -> BcmSegment {
         self.0.bcm_segment(index)
-    }
-
-    fn bcm_segments_per_group(&self) -> usize {
-        self.0.bcm_segments_per_group()
     }
 }
 
@@ -1054,9 +1057,15 @@ mod tests {
     impl FrameBuffer for TestFrameBuffer {
         type Word = u8;
 
-        fn bcm_segment_count(&self) -> usize {
-            1
-        }
+        const BCM_SEGMENT_SHAPES: [(usize, usize); crate::BCM_SEGMENT_SHAPES_CAPACITY] = {
+            let mut shapes = [(0usize, 0usize); crate::BCM_SEGMENT_SHAPES_CAPACITY];
+            shapes[0] = (8, 1);
+            shapes
+        };
+
+        const BCM_PERIOD_LEN: usize = 1;
+
+        const BCM_PERIOD_COUNT: usize = 1;
 
         fn bcm_segment(&self, index: usize) -> BcmSegment {
             assert!(index == 0);
