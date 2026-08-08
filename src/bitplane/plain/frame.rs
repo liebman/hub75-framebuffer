@@ -158,7 +158,7 @@ const fn segment_shapes<const NROWS: usize, const COLS: usize, const PLANES: usi
 
 /// Plane-major BCM framebuffer (per-plane storage).
 #[derive(Copy, Clone)]
-#[repr(C)]
+#[repr(C, align(4))]
 pub struct DmaFrameBuffer<const NROWS: usize, const COLS: usize, const PLANES: usize> {
     pub(crate) planes: [PlaneData<NROWS, COLS>; PLANES],
 }

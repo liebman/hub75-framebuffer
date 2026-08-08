@@ -362,7 +362,7 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
 /// - `COLS`: number of columns (panel width)
 /// - `PLANES`: number of bit-planes (typically 8 for full 8-bit colour)
 #[derive(Copy, Clone)]
-#[repr(C)]
+#[repr(C, align(4))]
 pub struct DmaFrameBuffer<const NROWS: usize, const COLS: usize, const PLANES: usize> {
     pub(crate) rows: [RowData<COLS, PLANES>; NROWS],
 }
