@@ -132,7 +132,8 @@
 use core::convert::Infallible;
 
 use crate::{
-    BcmSegment, FrameBuffer, FrameBufferOperations, MutableFrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY,
+    map_row_index, slot_addresses, BcmSegment, FrameBuffer, FrameBufferOperations,
+    MutableFrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY,
 };
 use bitfield::bitfield;
 use embedded_dma::ReadBuffer;
@@ -420,15 +421,11 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
     }
 
     pub const fn format(&mut self) {
-        let mut addr = 0;
-        while addr < NROWS {
-            let prev_addr = if addr == 0 {
-                NROWS as u8 - 1
-            } else {
-                addr as u8 - 1
-            };
-            self.rows[addr].format(prev_addr);
-            addr += 1;
+        let mut slot = 0;
+        while slot < NROWS {
+            let (prev_addr, _) = slot_addresses::<NROWS>(slot);
+            self.rows[slot].format(prev_addr);
+            slot += 1;
         }
     }
 
@@ -442,7 +439,8 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
 
     #[inline]
     pub fn set_pixel(&mut self, y: usize, x: usize, red: bool, green: bool, blue: bool) {
-        let row = &mut self.rows[if y < NROWS { y } else { y - NROWS }];
+        let row_idx = map_row_index::<NROWS>(if y < NROWS { y } else { y - NROWS });
+        let row = &mut self.rows[row_idx];
         if y < NROWS {
             row.set_color0(x, red, green, blue);
         } else {
@@ -945,6 +943,12 @@ mod tests {
         map_index(index)
     }
 
+    // Helper function to get the physical memory slot for a logical row-pair
+    // index (reversed when the `reverse-row-order` feature is enabled)
+    fn get_mapped_row(row_idx: usize) -> usize {
+        map_row_index::<TEST_NROWS>(row_idx)
+    }
+
     #[test]
     fn test_entry_construction() {
         let entry = Entry::new();
@@ -1099,7 +1103,7 @@ mod tests {
         for (physical_i, entry) in row.data.iter().enumerate() {
             let logical_i = get_mapped_index(physical_i);
 
-            assert_eq!(entry.addr(), prev_addr as u16);
+            assert_eq!(entry.addr(), u16::from(prev_addr));
 
             if logical_i == TEST_COLS - 1 {
                 assert_eq!(entry.latch(), true);
@@ -1175,16 +1179,16 @@ mod tests {
 
         frame.format();
 
-        for addr in 0..TEST_NROWS {
-            let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
-            let row = &frame.rows[addr];
+        for slot in 0..TEST_NROWS {
+            let (prev_addr, _) = slot_addresses::<TEST_NROWS>(slot);
+            let row = &frame.rows[slot];
 
             let last_pixel_idx = get_mapped_index(TEST_COLS - 1);
-            assert_eq!(row.data[last_pixel_idx].addr(), prev_addr as u16);
+            assert_eq!(row.data[last_pixel_idx].addr(), u16::from(prev_addr));
             assert_eq!(row.data[last_pixel_idx].latch(), true);
 
             let first_pixel_idx = get_mapped_index(0);
-            assert_eq!(row.data[first_pixel_idx].addr(), prev_addr as u16);
+            assert_eq!(row.data[first_pixel_idx].addr(), u16::from(prev_addr));
             assert_eq!(row.data[first_pixel_idx].latch(), false);
         }
     }
@@ -1197,17 +1201,56 @@ mod tests {
         frame.set_pixel(5, 10, true, false, true);
 
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            true
+        );
 
         // Test setting pixel in lower half (y >= NROWS)
         frame.set_pixel(TEST_NROWS + 5, 15, false, true, false);
 
         let mapped_col_15 = get_mapped_index(15);
-        assert_eq!(frame.rows[5].data[mapped_col_15].red2(), false);
-        assert_eq!(frame.rows[5].data[mapped_col_15].grn2(), true);
-        assert_eq!(frame.rows[5].data[mapped_col_15].blu2(), false);
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].red2(),
+            false
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].grn2(),
+            true
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].blu2(),
+            false
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn test_reverse_row_order() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Slot 0 is streamed first and renders the last panel row; while it
+        // is shifted the panel still displays row 0 (latched by the previous
+        // frame's final slot), so its entries carry prev_addr 0.
+        let first = &fb.data.frames[0].rows[0];
+        assert_eq!(first.data[get_mapped_index(0)].addr(), 0);
+        // The final slot renders panel row 0 and carries prev_addr 1.
+        let last = &fb.data.frames[0].rows[TEST_NROWS - 1];
+        assert_eq!(last.data[get_mapped_index(0)].addr(), 1);
+
+        // Logical row 0 maps to the last memory slot.
+        fb.set_pixel(Point::new(3, 0), Color::RED);
+        let col3 = get_mapped_index(3);
+        assert!(fb.data.frames[0].rows[TEST_NROWS - 1].data[col3].red1());
+        assert!(!fb.data.frames[0].rows[0].data[col3].red1());
     }
 
     #[test]
@@ -1249,16 +1292,16 @@ mod tests {
         let fb = TestFrameBuffer::new();
 
         for frame in &fb.data.frames {
-            for addr in 0..TEST_NROWS {
-                let prev_addr = if addr == 0 { TEST_NROWS - 1 } else { addr - 1 };
-                let row = &frame.rows[addr];
+            for slot in 0..TEST_NROWS {
+                let (prev_addr, _) = slot_addresses::<TEST_NROWS>(slot);
+                let row = &frame.rows[slot];
 
                 let last_pixel_idx = get_mapped_index(TEST_COLS - 1);
-                assert_eq!(row.data[last_pixel_idx].addr(), prev_addr as u16);
+                assert_eq!(row.data[last_pixel_idx].addr(), u16::from(prev_addr));
                 assert_eq!(row.data[last_pixel_idx].latch(), true);
 
                 let first_pixel_idx = get_mapped_index(0);
-                assert_eq!(row.data[first_pixel_idx].addr(), prev_addr as u16);
+                assert_eq!(row.data[first_pixel_idx].addr(), u16::from(prev_addr));
                 assert_eq!(row.data[first_pixel_idx].latch(), false);
             }
         }
@@ -1290,9 +1333,18 @@ mod tests {
         for frame in &fb.data.frames {
             // Check upper half pixel
             let mapped_col_10 = get_mapped_index(10);
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), false);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                false
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                false
+            );
         }
     }
 
@@ -1318,7 +1370,10 @@ mod tests {
             let should_be_active = test_brightness >= frame_threshold;
 
             let mapped_col_0 = get_mapped_index(0);
-            assert_eq!(frame.rows[0].data[mapped_col_0].red1(), should_be_active);
+            assert_eq!(
+                frame.rows[get_mapped_row(0)].data[mapped_col_0].red1(),
+                should_be_active
+            );
         }
     }
 
@@ -1394,60 +1449,60 @@ mod tests {
         // Red pixel at (5, 2) - should be red in first frame
         let col_idx = get_mapped_index(5);
         assert_eq!(
-            first_frame.rows[2].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].red1(),
             Color::RED.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[2].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].grn1(),
             Color::RED.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[2].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].blu1(),
             Color::RED.b() >= first_frame_threshold
         );
 
         // Green pixel at (10, 5) - should be green in first frame
         let col_idx = get_mapped_index(10);
         assert_eq!(
-            first_frame.rows[5].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].red1(),
             Color::GREEN.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[5].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].grn1(),
             Color::GREEN.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[5].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].blu1(),
             Color::GREEN.b() >= first_frame_threshold
         );
 
         // Blue pixel at (15, 8) - should be blue in first frame
         let col_idx = get_mapped_index(15);
         assert_eq!(
-            first_frame.rows[8].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].red1(),
             Color::BLUE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[8].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].grn1(),
             Color::BLUE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[8].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].blu1(),
             Color::BLUE.b() >= first_frame_threshold
         );
 
         // White pixel at (20, 10) - should be white in first frame
         let col_idx = get_mapped_index(20);
         assert_eq!(
-            first_frame.rows[10].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].red1(),
             Color::WHITE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[10].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].grn1(),
             Color::WHITE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[10].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].blu1(),
             Color::WHITE.b() >= first_frame_threshold
         );
 
@@ -1455,53 +1510,62 @@ mod tests {
         // Red pixel at (25, TEST_NROWS + 3) -> row 3, color1
         let col_idx = get_mapped_index(25);
         assert_eq!(
-            first_frame.rows[3].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].red2(),
             Color::RED.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[3].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].grn2(),
             Color::RED.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[3].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].blu2(),
             Color::RED.b() >= first_frame_threshold
         );
 
         // Green pixel at (30, TEST_NROWS + 7) -> row 7, color1
         let col_idx = get_mapped_index(30);
         assert_eq!(
-            first_frame.rows[7].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].red2(),
             Color::GREEN.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[7].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].grn2(),
             Color::GREEN.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[7].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].blu2(),
             Color::GREEN.b() >= first_frame_threshold
         );
 
         // Blue pixel at (35, TEST_NROWS + 12) -> row 12, color1
         let col_idx = get_mapped_index(35);
         assert_eq!(
-            first_frame.rows[12].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].red2(),
             Color::BLUE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[12].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].grn2(),
             Color::BLUE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[12].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].blu2(),
             Color::BLUE.b() >= first_frame_threshold
         );
 
         // Test black pixel - should not be visible in any frame
         let col_idx = get_mapped_index(40);
-        assert_eq!(first_frame.rows[1].data[col_idx].red1(), false);
-        assert_eq!(first_frame.rows[1].data[col_idx].grn1(), false);
-        assert_eq!(first_frame.rows[1].data[col_idx].blu1(), false);
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].red1(),
+            false
+        );
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].grn1(),
+            false
+        );
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].blu1(),
+            false
+        );
     }
 
     #[test]
@@ -1531,17 +1595,35 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
     }
 
     #[test]
@@ -1554,17 +1636,35 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
     }
 
     #[test]
@@ -1579,9 +1679,18 @@ mod tests {
         // Verify white pixel is lit in all frames (255 >= all thresholds)
         for frame in fb.data.frames.iter() {
             // White (255) should be active in all frames since it's >= all thresholds
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                true
+            );
         }
 
         // Now overwrite with 50% white (128, 128, 128)
@@ -1597,23 +1706,32 @@ mod tests {
             let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
             let should_be_active = 128 >= frame_threshold;
 
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), should_be_active);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                should_be_active
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                should_be_active
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                should_be_active
+            );
         }
 
         // Specifically verify the expected pattern for 3-bit depth
         // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
         for frame_idx in 0..4 {
             assert_eq!(
-                fb.data.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.data.frames[frame_idx].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
                 true
             );
         }
         // Frames 4-6 should be inactive (thresholds 160, 192, 224)
         for frame_idx in 4..TEST_FRAME_COUNT {
             assert_eq!(
-                fb.data.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.data.frames[frame_idx].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
                 false
             );
         }
@@ -1799,19 +1917,34 @@ mod tests {
 
         // Verify pixels are set
         let mapped_col_10 = get_mapped_index(10);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), true);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
 
         // Clear using fast method
         fb.erase();
 
         // Verify pixels are cleared but timing signals remain
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.data.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
 
         // Verify timing signals are still present (check last pixel has latch)
         let last_col = get_mapped_index(TEST_COLS - 1);
-        assert_eq!(fb.data.frames[0].rows[5].data[last_col].latch(), true);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[last_col].latch(),
+            true
+        );
     }
 
     // Remove the old `test_draw_char_bottom_right` and replace with a helper + combined test.
@@ -1857,9 +1990,9 @@ mod tests {
                 // Fetch Entry from frame 0
                 let frame0 = &fb.data.frames[0];
                 let e = if gy < TEST_NROWS {
-                    &frame0.rows[gy].data[get_mapped_index(gx)]
+                    &frame0.rows[get_mapped_row(gy)].data[get_mapped_index(gx)]
                 } else {
-                    &frame0.rows[gy - TEST_NROWS].data[get_mapped_index(gx)]
+                    &frame0.rows[get_mapped_row(gy - TEST_NROWS)].data[get_mapped_index(gx)]
                 };
 
                 let (r, g, b) = if gy >= TEST_NROWS {
@@ -1902,12 +2035,18 @@ mod tests {
         // Verify colors cleared on frame 0
         let mc10 = get_mapped_index(10);
         let mc20 = get_mapped_index(20);
-        assert_eq!(fb.data.frames[0].rows[5].data[mc10].red1(), false);
-        assert_eq!(fb.data.frames[0].rows[10].data[mc20].grn1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(5)].data[mc10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(10)].data[mc20].grn1(),
+            false
+        );
 
         // Timing signals preserved: last pixel should have latch
         let last_col = get_mapped_index(TEST_COLS - 1);
-        assert!(fb.data.frames[0].rows[0].data[last_col].latch());
+        assert!(fb.data.frames[0].rows[get_mapped_row(0)].data[last_col].latch());
     }
 
     #[test]
@@ -1922,9 +2061,18 @@ mod tests {
         );
 
         let idx = get_mapped_index(8);
-        assert_eq!(fb.data.frames[0].rows[3].data[idx].blu1(), true);
-        assert_eq!(fb.data.frames[0].rows[3].data[idx].red1(), false);
-        assert_eq!(fb.data.frames[0].rows[3].data[idx].grn1(), false);
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(3)].data[idx].blu1(),
+            true
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(3)].data[idx].red1(),
+            false
+        );
+        assert_eq!(
+            fb.data.frames[0].rows[get_mapped_row(3)].data[idx].grn1(),
+            false
+        );
     }
 
     #[test]

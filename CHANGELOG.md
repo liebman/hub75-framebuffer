@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* `reverse-row-order` feature storing the rows of every framebuffer layout in
+  reverse scan order, so the DMA stream renders the last panel row first and
+  row 0 last. `format()` writes the row addresses back-to-front (keeping the
+  deferred address-change invariant intact) and the pixel-setting paths remap
+  the logical row index to the reversed memory slot, so logical coordinates
+  are unchanged. Applies to all six framebuffer implementations
+  (`plain`, `latched`, `bitplane::plain::{frame, row}`, and
+  `bitplane::latched::{frame, row}`), and hence to the `tiling` wrappers that
+  delegate to them.
+
 * `lead-blank-32` and `trail-blank-32` features extending blanking delay options to 32 pixel-clock cycles.
 
 * **Row-major bitplane framebuffer** (`bitplane::plain::row::DmaFrameBuffer`).

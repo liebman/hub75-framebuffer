@@ -29,6 +29,9 @@ jobs:
           - "tail-closes-latch"
           - "esp32-ordering,tail-closes-latch"
           - "skip-black-pixels"
+          - "reverse-row-order"
+          - "reverse-row-order,esp32-ordering"
+          - "reverse-row-order,inter-row-blank-8,tail-closes-latch"
     steps:
       - uses: actions/checkout@v4
       

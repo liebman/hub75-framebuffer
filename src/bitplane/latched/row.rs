@@ -115,6 +115,7 @@ use super::{
     TRAIL_BLANK_DELAY,
 };
 use crate::Color;
+use crate::{map_row_index, slot_addresses};
 use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
@@ -356,10 +357,11 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// documentation for the exact distribution.
     #[inline]
     pub const fn format(&mut self) {
-        let mut r = 0;
-        while r < NROWS {
-            self.rows[r].format(r as u8);
-            r += 1;
+        let mut slot = 0;
+        while slot < NROWS {
+            let (_, addr) = slot_addresses::<NROWS>(slot);
+            self.rows[slot].format(addr);
+            slot += 1;
         }
     }
 
@@ -398,7 +400,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             return;
         }
 
-        let row_idx = if y < NROWS { y } else { y - NROWS };
+        let row_idx = map_row_index::<NROWS>(if y < NROWS { y } else { y - NROWS });
         let is_top = y < NROWS;
         let red = color.r();
         let green = color.g();
@@ -609,28 +611,29 @@ mod tests {
     fn format_sets_current_row_address_for_all_planes() {
         let fb = TestBuffer::new();
 
-        for row_idx in 0..16 {
+        for slot in 0..16 {
+            let (_, addr) = slot_addresses::<16>(slot);
             for plane_idx in 0..TEST_PLANES {
-                let plane = &fb.rows[row_idx].planes[plane_idx];
+                let plane = &fb.rows[slot].planes[plane_idx];
                 assert_eq!(
                     plane.address[map_index(0)].addr(),
-                    row_idx as u8,
-                    "row {row_idx} plane {plane_idx} addr byte 0 should be the current row"
+                    addr,
+                    "slot {slot} plane {plane_idx} addr byte 0 should be the current row"
                 );
                 assert_eq!(
                     plane.address[map_index(1)].addr(),
-                    row_idx as u8,
-                    "row {row_idx} plane {plane_idx} addr byte 1 should be the current row"
+                    addr,
+                    "slot {slot} plane {plane_idx} addr byte 1 should be the current row"
                 );
                 assert_eq!(
                     plane.address[map_index(2)].addr(),
-                    row_idx as u8,
-                    "row {row_idx} plane {plane_idx} addr byte 2 should be the current row"
+                    addr,
+                    "slot {slot} plane {plane_idx} addr byte 2 should be the current row"
                 );
                 assert_eq!(
                     plane.address[map_index(3)].0,
                     OE_BLANK,
-                    "row {row_idx} plane {plane_idx} addr byte 3 should be blanked with addr 0"
+                    "slot {slot} plane {plane_idx} addr byte 3 should be blanked with addr 0"
                 );
             }
         }
@@ -813,12 +816,13 @@ mod tests {
         type OnePlane = DmaFrameBuffer<16, TEST_COLS, 1>;
         let fb = OnePlane::new();
 
-        for row_idx in 0..16 {
-            let plane = &fb.rows[row_idx].planes[0];
+        for slot in 0..16 {
+            let (_, addr) = slot_addresses::<16>(slot);
+            let plane = &fb.rows[slot].planes[0];
             assert_eq!(
                 plane.address[map_index(0)].addr(),
-                row_idx as u8,
-                "single plane row {row_idx}: should use the current row address"
+                addr,
+                "single plane slot {slot}: should use the current row address"
             );
 
             // The single plane both precedes and follows the address change,
@@ -826,7 +830,7 @@ mod tests {
             let expected = make_row_plane_template::<TEST_COLS>(true, true);
             assert_eq!(
                 plane.data, expected,
-                "single plane row {row_idx}: template mismatch"
+                "single plane slot {slot}: template mismatch"
             );
         }
     }
@@ -839,7 +843,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[3].planes[plane_idx].data[map_index(2)];
+            let entry = fb.rows[map_row_index::<16>(3)].planes[plane_idx].data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
@@ -854,7 +858,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[4].planes[plane_idx].data[map_index(4)];
+            let entry = fb.rows[map_row_index::<16>(4)].planes[plane_idx].data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
@@ -862,10 +866,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn reverse_row_order_stores_rows_back_to_front() {
+        let mut fb = TestBuffer::new();
+
+        // Slot 0 is streamed first and renders the last panel row; the final
+        // slot renders panel row 0. The address bytes carry the slot's own
+        // row address.
+        assert_eq!(fb.rows[0].planes[0].address[map_index(0)].addr(), 15);
+        assert_eq!(fb.rows[15].planes[0].address[map_index(0)].addr(), 0);
+
+        // Logical row 0 maps to the last memory slot.
+        fb.set_pixel(Point::new(2, 0), Color::RED);
+        let col2 = map_index(2);
+        assert!(fb.rows[15].planes[TEST_PLANES - 1].data[col2].red1());
+        assert!(!fb.rows[0].planes[TEST_PLANES - 1].data[col2].red1());
+    }
+
+    #[test]
     fn erase_clears_only_color_bits() {
         let mut fb = TestBuffer::new();
-        let oe_before = fb.rows[0].planes[0].data[map_index(1)].output_enable();
-        let addr_before = fb.rows[3].planes[2].address;
+        let oe_before =
+            fb.rows[map_row_index::<16>(0)].planes[0].data[map_index(1)].output_enable();
+        let addr_before = fb.rows[map_row_index::<16>(3)].planes[2].address;
         fb.set_pixel(Point::new(0, 0), Color::WHITE);
         fb.erase();
 
@@ -883,10 +906,13 @@ mod tests {
         }
 
         assert_eq!(
-            fb.rows[0].planes[0].data[map_index(1)].output_enable(),
+            fb.rows[map_row_index::<16>(0)].planes[0].data[map_index(1)].output_enable(),
             oe_before
         );
-        assert_eq!(fb.rows[3].planes[2].address, addr_before);
+        assert_eq!(
+            fb.rows[map_row_index::<16>(3)].planes[2].address,
+            addr_before
+        );
     }
 
     #[test]
@@ -898,7 +924,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[1].planes[plane_idx].data[map_index(1)];
+            let entry = fb.rows[map_row_index::<16>(1)].planes[plane_idx].data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
             assert!(!entry.blu1());
@@ -926,17 +952,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.rows[5].planes[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert!(fb.rows[5].planes[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -949,17 +975,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.rows[5].planes[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[5].planes[0].data[mapped_col_10].blu1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].planes[0].data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -1075,7 +1101,7 @@ mod tests {
         FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
 
         // Plane 7 (MSB) carries bit 7; GREEN = 0xFF so bit 7 is set
-        assert!(fb.rows[5].planes[TEST_PLANES - 1].data[map_index(3)].grn1());
+        assert!(fb.rows[map_row_index::<16>(5)].planes[TEST_PLANES - 1].data[map_index(3)].grn1());
 
         FrameBufferOperations::erase(&mut fb);
         for row in &fb.rows {
@@ -1278,10 +1304,17 @@ mod tests {
 
         let col_idx = map_index(10);
         let gap = usize::from(HAS_GAP);
+        // Physical slot holding logical row 0 (reversed by reverse-row-order).
+        let row0_base = map_row_index::<32>(0) * (5 + gap);
 
         for plane_idx in 0..5usize {
-            // Row 0: plane 0 is segment 0, planes 1+ follow the gap segment.
-            let seg = fb.bcm_segment(if plane_idx == 0 { 0 } else { plane_idx + gap });
+            // Row 0: plane 0 is the slot's first segment, planes 1+ follow the
+            // gap segment.
+            let seg = fb.bcm_segment(if plane_idx == 0 {
+                row0_base
+            } else {
+                row0_base + plane_idx + gap
+            });
 
             let data = unsafe { core::slice::from_raw_parts(seg.ptr, TRINITY_COLS) };
             let raw = data[col_idx];
@@ -1327,9 +1360,16 @@ mod tests {
 
         let mut any_nonzero = false;
         let gap = usize::from(HAS_GAP);
+        // Physical slot holding logical row 0 (reversed by reverse-row-order).
+        let row0_base = map_row_index::<32>(0) * (5 + gap);
         for plane_idx in 0..5usize {
-            // Row 0: plane 0 is segment 0, planes 1+ follow the gap segment.
-            let seg = fb.bcm_segment(if plane_idx == 0 { 0 } else { plane_idx + gap });
+            // Row 0: plane 0 is the slot's first segment, planes 1+ follow the
+            // gap segment.
+            let seg = fb.bcm_segment(if plane_idx == 0 {
+                row0_base
+            } else {
+                row0_base + plane_idx + gap
+            });
             let data = unsafe { core::slice::from_raw_parts(seg.ptr, TRINITY_COLS) };
 
             for x in 0..TRINITY_COLS {

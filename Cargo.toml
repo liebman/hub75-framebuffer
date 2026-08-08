@@ -31,6 +31,7 @@ embedded-graphics = { version = "0.8.2" }
 default = []
 skip-black-pixels = []
 esp32-ordering = []
+reverse-row-order = []
 defmt = ["dep:defmt"]
 doc-images = ["dep:embed-doc-image"]
 

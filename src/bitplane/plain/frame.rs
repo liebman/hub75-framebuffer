@@ -38,6 +38,7 @@ use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
+use crate::{map_row_index, slot_addresses};
 use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
@@ -199,15 +200,11 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     pub const fn format(&mut self) {
         let mut p = 0;
         while p < PLANES {
-            let mut row_idx = 0;
-            while row_idx < NROWS {
-                let prev_addr = if row_idx == 0 {
-                    NROWS as u8 - 1
-                } else {
-                    row_idx as u8 - 1
-                };
-                self.planes[p].rows[row_idx].format(prev_addr);
-                row_idx += 1;
+            let mut slot = 0;
+            while slot < NROWS {
+                let (prev_addr, _) = slot_addresses::<NROWS>(slot);
+                self.planes[p].rows[slot].format(prev_addr);
+                slot += 1;
             }
             #[cfg(feature = "tail-closes-latch")]
             {
@@ -256,7 +253,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             return;
         }
 
-        let row_idx = if y < NROWS { y } else { y - NROWS };
+        let row_idx = map_row_index::<NROWS>(if y < NROWS { y } else { y - NROWS });
         let is_top = y < NROWS;
         let red = color.r();
         let green = color.g();
@@ -420,17 +417,14 @@ mod tests {
         fb.format();
 
         for plane_idx in 0..8 {
-            for row_idx in 0..16 {
-                let prev_addr = if row_idx == 0 { 15 } else { row_idx - 1 };
+            for slot in 0..16 {
+                let (prev_addr, _) = slot_addresses::<16>(slot);
                 let last_col = map_index(TEST_COLS - 1);
                 assert_eq!(
-                    fb.planes[plane_idx].rows[row_idx].data[last_col].addr(),
-                    prev_addr as u16
+                    fb.planes[plane_idx].rows[slot].data[last_col].addr(),
+                    u16::from(prev_addr)
                 );
-                assert_eq!(
-                    fb.planes[plane_idx].rows[row_idx].data[last_col].latch(),
-                    true
-                );
+                assert_eq!(fb.planes[plane_idx].rows[slot].data[last_col].latch(), true);
             }
         }
     }
@@ -443,7 +437,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = plane_idx;
-            let entry = fb.planes[plane_idx].rows[3].data[map_index(2)];
+            let entry = fb.planes[plane_idx].rows[map_row_index::<16>(3)].data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
@@ -458,7 +452,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = plane_idx;
-            let entry = fb.planes[plane_idx].rows[4].data[map_index(4)];
+            let entry = fb.planes[plane_idx].rows[map_row_index::<16>(4)].data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
@@ -466,9 +460,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn reverse_row_order_stores_rows_back_to_front() {
+        let mut fb = TestBuffer::new();
+
+        // Slot 0 is streamed first and renders the last panel row; while it
+        // is shifted the panel still displays row 0 (latched by the previous
+        // frame's final slot), so its entries carry prev_addr 0.
+        assert_eq!(fb.planes[0].rows[0].data[map_index(0)].addr(), 0);
+        // The final slot renders panel row 0 and carries prev_addr 1.
+        assert_eq!(fb.planes[0].rows[15].data[map_index(0)].addr(), 1);
+
+        // Logical row 0 maps to the last memory slot.
+        fb.set_pixel(Point::new(2, 0), Color::RED);
+        let col2 = map_index(2);
+        assert!(fb.planes[7].rows[15].data[col2].red1());
+        assert!(!fb.planes[7].rows[0].data[col2].red1());
+    }
+
+    #[test]
     fn erase_clears_only_color_bits() {
         let mut fb = TestBuffer::new();
-        let oe_before = fb.planes[0].rows[0].data[map_index(1)].output_enable();
+        let oe_before =
+            fb.planes[0].rows[map_row_index::<16>(0)].data[map_index(1)].output_enable();
         fb.set_pixel(Point::new(0, 0), Color::WHITE);
         fb.erase();
 
@@ -486,7 +500,7 @@ mod tests {
         }
 
         assert_eq!(
-            fb.planes[0].rows[0].data[map_index(1)].output_enable(),
+            fb.planes[0].rows[map_row_index::<16>(0)].data[map_index(1)].output_enable(),
             oe_before
         );
     }
@@ -500,7 +514,7 @@ mod tests {
 
         for plane_idx in 0..8 {
             let bit = plane_idx;
-            let entry = fb.planes[plane_idx].rows[1].data[map_index(1)];
+            let entry = fb.planes[plane_idx].rows[map_row_index::<16>(1)].data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
             assert!(!entry.blu1());
@@ -528,17 +542,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.planes[0].rows[5].data[mapped_col_10].red1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].grn1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].blu1());
+        assert!(fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert!(fb.planes[0].rows[5].data[mapped_col_10].red1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].grn1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].blu1());
+        assert!(fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -551,17 +565,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.planes[0].rows[5].data[mapped_col_10].red1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].grn1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].blu1());
+        assert!(fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].red1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].grn1());
-        assert!(!fb.planes[0].rows[5].data[mapped_col_10].blu1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0].rows[map_row_index::<16>(5)].data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -635,7 +649,7 @@ mod tests {
         let mut fb = TestBuffer::new();
         FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
 
-        assert!(fb.planes[0].rows[5].data[map_index(3)].grn1());
+        assert!(fb.planes[0].rows[map_row_index::<16>(5)].data[map_index(3)].grn1());
 
         FrameBufferOperations::erase(&mut fb);
         for plane in &fb.planes {

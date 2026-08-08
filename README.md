@@ -143,6 +143,22 @@ Skip drawing black pixels for performance boost in UI applications. When
 enabled, calls to `set_pixel()` with `Color::BLACK` return early without
 writing to the framebuffer, assuming the framebuffer was already cleared.
 
+### `reverse-row-order`
+
+Store the rows of the framebuffer in reverse scan order so that the DMA
+stream renders the last panel row first and row 0 last. The rows are
+physically reversed in the buffer (row addresses are written back-to-front
+while keeping the deferred address-change timing intact), and `set_pixel()`
+transparently maps logical rows to the reversed slots, so drawing code and
+coordinates are completely unaffected — only the scan order changes. Works
+with all framebuffer layouts (`plain`, `latched`, and all `bitplane::*`
+variants) and combines freely with the other features.
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.11.0", features = ["reverse-row-order"] }
+```
+
 ### `lead-blank-1/2/4/8/16/32` / `trail-blank-1/2/4/8/16/32`
 
 Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted around

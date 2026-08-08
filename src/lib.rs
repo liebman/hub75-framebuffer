@@ -135,6 +135,19 @@
 //! hub75-framebuffer = { version = "0.11.0", features = ["tail-closes-latch"] }
 //! ```
 //!
+//! ### `reverse-row-order` Feature (disabled by default)
+//! Stores the rows of every framebuffer layout in reverse scan order so that
+//! the DMA stream renders the last panel row first and row 0 last. The rows
+//! are physically reversed in the buffer (row addresses are written
+//! back-to-front while keeping the deferred address-change timing intact) and
+//! the pixel-setting paths map logical rows to the reversed slots, so logical
+//! coordinates are unchanged — only the scan order changes.
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.11.0", features = ["reverse-row-order"] }
+//! ```
+//!
 //! ### Blanking delay features (`lead-blank-*` / `trail-blank-*`)
 //!
 //! Control the number of pixel-clock cycles of blanking (`OE` HIGH) inserted
@@ -270,6 +283,54 @@ pub const fn compute_rows(rows: usize) -> usize {
 #[must_use]
 pub const fn compute_frame_count(bits: u8) -> usize {
     (1usize << bits) - 1
+}
+
+/// Maps a logical row-pair index to its physical memory slot.
+///
+/// With the `reverse-row-order` feature the rows are stored back-to-front so
+/// that the DMA stream renders the last panel row first and row 0 last; the
+/// pixel-setting paths use this to compensate, keeping logical coordinates
+/// unchanged. Without the feature this is the identity mapping.
+#[inline]
+pub(crate) const fn map_row_index<const NROWS: usize>(row_idx: usize) -> usize {
+    #[cfg(feature = "reverse-row-order")]
+    {
+        NROWS - 1 - row_idx
+    }
+    #[cfg(not(feature = "reverse-row-order"))]
+    {
+        row_idx
+    }
+}
+
+/// Returns the `(prev_addr, addr)` row addresses for the row stored in
+/// physical memory slot `slot` (slots are streamed in order `0..NROWS`).
+///
+/// `addr` is the panel row address rendered from that slot and `prev_addr` is
+/// the address of the row rendered immediately before it (the row displayed
+/// while this slot's data is shifted in). With the `reverse-row-order`
+/// feature the scan order is reversed: slot 0 renders row `NROWS - 1` first
+/// and the last slot renders row 0 last, so each slot's `prev_addr` is the
+/// *next* higher address (wrapping to 0 for slot 0, which follows the
+/// previous frame's final slot rendering row 0).
+#[inline]
+pub(crate) const fn slot_addresses<const NROWS: usize>(slot: usize) -> (u8, u8) {
+    #[cfg(feature = "reverse-row-order")]
+    {
+        let addr = (NROWS - 1 - slot) as u8;
+        let prev_addr = if slot == 0 { 0 } else { (NROWS - slot) as u8 };
+        (prev_addr, addr)
+    }
+    #[cfg(not(feature = "reverse-row-order"))]
+    {
+        let addr = slot as u8;
+        let prev_addr = if slot == 0 {
+            NROWS as u8 - 1
+        } else {
+            slot as u8 - 1
+        };
+        (prev_addr, addr)
+    }
 }
 
 /// Capacity of the [`FrameBuffer::BCM_SEGMENT_SHAPES`] array.
@@ -551,6 +612,55 @@ mod tests {
         for bits in 1..=8 {
             let expected = (1usize << bits) - 1;
             assert_eq!(compute_frame_count(bits), expected);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "reverse-row-order"))]
+    fn test_map_row_index_forward() {
+        for r in 0..16 {
+            assert_eq!(map_row_index::<16>(r), r);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn test_map_row_index_reversed() {
+        for r in 0..16 {
+            assert_eq!(map_row_index::<16>(r), 15 - r);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "reverse-row-order"))]
+    fn test_slot_addresses_forward() {
+        // Slot j renders panel row j; while it is shifted the panel displays
+        // row j-1 (wrapping to the previous frame's last row for slot 0).
+        for slot in 0..16usize {
+            let (prev_addr, addr) = slot_addresses::<16>(slot);
+            assert_eq!(addr, slot as u8);
+            assert_eq!(
+                prev_addr,
+                if slot == 0 { 15 } else { slot as u8 - 1 },
+                "prev_addr for slot {slot}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn test_slot_addresses_reversed() {
+        // Slot j renders panel row 15-j; while it is shifted the panel
+        // displays the previously rendered row 15-(j-1) (row 0 from the
+        // previous frame's final slot for slot 0).
+        for slot in 0..16usize {
+            let (prev_addr, addr) = slot_addresses::<16>(slot);
+            assert_eq!(addr, 15 - slot as u8);
+            assert_eq!(
+                prev_addr,
+                if slot == 0 { 0 } else { 16 - slot as u8 },
+                "prev_addr for slot {slot}"
+            );
         }
     }
 
