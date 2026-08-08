@@ -11,15 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚠️ Breaking
 
-* The `FrameBuffer` trait now describes its BCM scan sequence as static,
-  instance-free data via new associated constants: `BCM_SEGMENT_SHAPES`
-  (one period of `(len, reps)` segment shapes, padded to
-  `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_PERIOD_LEN`, and
-  `BCM_PERIOD_COUNT`. `BCM_SEGMENT_COUNT` defaults to
-  `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`, and `bcm_segment_count()` /
-  `bcm_segments_per_group()` are now provided methods reading the
-  constants. Downstream `FrameBuffer` implementors must add the new
-  constants; the method overrides can be removed.
+* The `FrameBuffer` trait's plane-oriented API was replaced by a BCM
+  segment API. **Removed:** `plane_count()`, `plane_ptr_len()`, and
+  `get_word_size()`. **Added:** required associated constants
+  `BCM_SEGMENT_SHAPES` (one period of `(len, reps)` segment shapes, padded
+  to `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_PERIOD_LEN`, and
+  `BCM_PERIOD_COUNT`, plus a required method
+  `bcm_segment(index) -> BcmSegment` (`BcmSegment` is a new public struct
+  with `ptr`, `len`, and `reps` fields). `BCM_SEGMENT_COUNT` (default
+  `BCM_PERIOD_LEN * BCM_PERIOD_COUNT`) and `BCM_SEGMENTS_PER_GROUP`
+  (default `1`) are optional overrides; `bcm_segment_count()` /
+  `bcm_segments_per_group()` are provided methods reading the constants.
+
+  **Migration:** downstream `FrameBuffer` implementors must delete their
+  `plane_count()` / `plane_ptr_len()` implementations and add the new
+  constants and `bcm_segment()`. Drivers that iterated planes via
+  `plane_ptr_len()` must now iterate `bcm_segment(0..bcm_segment_count())`,
+  streaming `reps` transfers of `len` bytes from `ptr` per segment.
 
 * `tiling::QuarterScan` gained a wiring-variant type parameter
   (`QuarterScan<ROWS, COLS, V = quarter_scan::SectionsSwapped>`) and is no
@@ -36,15 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LSB (previously the MSB), and the segment for plane `k` spans planes
   `k..PLANES` with `2^(k-1)` repetitions (segment 0 spans all planes with 1
   repetition), halving the number of DMA transfers per frame (`2^(PLANES-1)`
-  instead of `2^PLANES - 1`) with identical brightness. `bcm_segment_count()`
-  and `bcm_segments_per_group()` are unchanged, but segment `len`/`reps`
-  values changed.
+  instead of `2^PLANES - 1`) with identical brightness. The segment count
+  (`PLANES` per frame, one segment per group) is unchanged, but segment
+  `len`/`reps` values changed.
 
   **Migration:** drivers must no longer assume one segment == one plane: a
   segment's `len` may exceed the platform's maximum DMA transfer size, so
-  split each repetition into `div_ceil(len, max_chunk)` descriptors
-  (`dma_descriptor_count(max_chunk)` now accounts for this). Per-group ISR
-  cadence is unchanged (`PLANES` groups per frame), but inter-ISR intervals
+  on such platforms a segment must be split across multiple DMA
+  descriptors (`BCM_SEGMENT_SHAPES` exposes the static `len`/`reps` data
+  needed to size descriptor tables at compile time). Per-group ISR cadence
+  is unchanged (`PLANES` groups per frame), but inter-ISR intervals
   changed, and the longest contiguous single-plane (MSB) run per frame is
   now `2^(PLANES-2)` plane passes.
 
@@ -80,8 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   streamed between plane 0 (whose address bytes latch the data and change
   the row address) and plane 1.
 
-* `skip-black-pixels` support for all bitplane framebuffers
-  (`bitplane::plain::frame`, `bitplane::plain::row`, and `bitplane::latched`).
+* `skip-black-pixels` support `bitplane::plain::{frame, row}` and `bitplane::latched::{frame, row}`.
 
 * Compile-time validation of `NROWS` (1..=32) and `PLANES` (1..=8) for all
   bitplane framebuffers. Invalid configurations now panic in `const fn new()`
