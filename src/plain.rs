@@ -2037,7 +2037,8 @@ mod tests {
             assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_SEQUENCE_LEN..]
+        for &(len, reps) in
+            &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_SEQUENCE_LEN..]
         {
             assert_eq!((len, reps), (0, 0), "padding must be zero");
         }
