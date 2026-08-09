@@ -141,68 +141,7 @@ use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 
 use super::Color;
-
-#[cfg(feature = "lead-blank-1")]
-const LEAD_BLANK_DELAY: usize = 1;
-#[cfg(feature = "lead-blank-2")]
-const LEAD_BLANK_DELAY: usize = 2;
-#[cfg(feature = "lead-blank-4")]
-const LEAD_BLANK_DELAY: usize = 4;
-#[cfg(feature = "lead-blank-8")]
-const LEAD_BLANK_DELAY: usize = 8;
-#[cfg(feature = "lead-blank-16")]
-const LEAD_BLANK_DELAY: usize = 16;
-#[cfg(feature = "lead-blank-32")]
-const LEAD_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "lead-blank-1",
-    feature = "lead-blank-2",
-    feature = "lead-blank-4",
-    feature = "lead-blank-8",
-    feature = "lead-blank-16",
-    feature = "lead-blank-32"
-)))]
-const LEAD_BLANK_DELAY: usize = 1;
-
-#[cfg(feature = "trail-blank-1")]
-const TRAIL_BLANK_DELAY: usize = 1;
-#[cfg(feature = "trail-blank-2")]
-const TRAIL_BLANK_DELAY: usize = 2;
-#[cfg(feature = "trail-blank-4")]
-const TRAIL_BLANK_DELAY: usize = 4;
-#[cfg(feature = "trail-blank-8")]
-const TRAIL_BLANK_DELAY: usize = 8;
-#[cfg(feature = "trail-blank-16")]
-const TRAIL_BLANK_DELAY: usize = 16;
-#[cfg(feature = "trail-blank-32")]
-const TRAIL_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "trail-blank-1",
-    feature = "trail-blank-2",
-    feature = "trail-blank-4",
-    feature = "trail-blank-8",
-    feature = "trail-blank-16",
-    feature = "trail-blank-32"
-)))]
-const TRAIL_BLANK_DELAY: usize = 1;
-
-#[cfg(feature = "inter-row-blank-4")]
-const INTER_ROW_BLANK: usize = 4;
-#[cfg(feature = "inter-row-blank-8")]
-const INTER_ROW_BLANK: usize = 8;
-#[cfg(feature = "inter-row-blank-16")]
-const INTER_ROW_BLANK: usize = 16;
-#[cfg(feature = "inter-row-blank-32")]
-const INTER_ROW_BLANK: usize = 32;
-#[cfg(not(any(
-    feature = "inter-row-blank-4",
-    feature = "inter-row-blank-8",
-    feature = "inter-row-blank-16",
-    feature = "inter-row-blank-32"
-)))]
-const INTER_ROW_BLANK: usize = 0;
+use crate::{INTER_ROW_BLANK, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
 
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u16 = 0b1_0000_0000;
@@ -1865,8 +1804,10 @@ mod tests {
         let oe_active = !cfg!(feature = "invert-oe");
 
         // Trail blank: indices 0..TRAIL_BLANK_DELAY-1 (DMA start = physical right edge)
-        let trail_blank_idx = get_mapped_index(TRAIL_BLANK_DELAY - 1);
-        assert_eq!(row.data[trail_blank_idx].output_enable(), !oe_active);
+        if TRAIL_BLANK_DELAY > 0 {
+            let trail_blank_idx = get_mapped_index(TRAIL_BLANK_DELAY - 1);
+            assert_eq!(row.data[trail_blank_idx].output_enable(), !oe_active);
+        }
 
         let after_trail_idx = get_mapped_index(TRAIL_BLANK_DELAY);
         assert_eq!(row.data[after_trail_idx].output_enable(), oe_active);

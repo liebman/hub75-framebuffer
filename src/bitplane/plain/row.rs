@@ -828,12 +828,14 @@ mod tests {
 
             // No lead blank: the trailer and the next row's plane 0 keep this
             // row's address, so no address change follows the MSB plane.
-            let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
-            assert_eq!(
-                plane.data[lead_idx].output_enable(),
-                oe_active,
-                "last plane: near-end pixel should have OE active (no lead blank)"
-            );
+            if LEAD_BLANK_DELAY > 0 {
+                let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+                assert_eq!(
+                    plane.data[lead_idx].output_enable(),
+                    oe_active,
+                    "last plane: near-end pixel should have OE active (no lead blank)"
+                );
+            }
 
             let latch_idx = map_index(TEST_COLS - 1);
             assert_eq!(
@@ -880,12 +882,14 @@ mod tests {
         for row in &fb.rows {
             let plane = &row.pixels[1];
 
-            let trail_idx = map_index(0);
-            assert_eq!(
-                plane.data[trail_idx].output_enable(),
-                !oe_active,
-                "plane 1: trail blank should have OE blank"
-            );
+            if TRAIL_BLANK_DELAY > 0 {
+                let trail_idx = map_index(0);
+                assert_eq!(
+                    plane.data[trail_idx].output_enable(),
+                    !oe_active,
+                    "plane 1: trail blank should have OE blank"
+                );
+            }
 
             let active_idx = map_index(TRAIL_BLANK_DELAY);
             assert_eq!(
@@ -928,19 +932,23 @@ mod tests {
                 "single plane slot {slot}: should use prev_addr"
             );
 
-            let trail_idx = map_index(0);
-            assert_eq!(
-                plane.data[trail_idx].output_enable(),
-                !oe_active,
-                "single plane: trail blank should have OE blank"
-            );
+            if TRAIL_BLANK_DELAY > 0 {
+                let trail_idx = map_index(0);
+                assert_eq!(
+                    plane.data[trail_idx].output_enable(),
+                    !oe_active,
+                    "single plane: trail blank should have OE blank"
+                );
+            }
 
-            let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
-            assert_eq!(
-                plane.data[lead_idx].output_enable(),
-                !oe_active,
-                "single plane: lead blank should have OE blank"
-            );
+            if LEAD_BLANK_DELAY > 0 {
+                let lead_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
+                assert_eq!(
+                    plane.data[lead_idx].output_enable(),
+                    !oe_active,
+                    "single plane: lead blank should have OE blank"
+                );
+            }
 
             let active_idx = map_index(TRAIL_BLANK_DELAY);
             assert_eq!(

@@ -339,6 +339,107 @@ pub(crate) const fn slot_addresses<const NROWS: usize>(slot: usize) -> (u8, u8) 
 /// plus an end-of-row trailer.
 pub const BCM_SEGMENT_SHAPES_CAPACITY: usize = 10;
 
+// ---------------------------------------------------------------------------
+// Feature-gated blanking-delay constants (shared across all framebuffer types)
+// ---------------------------------------------------------------------------
+
+// Compile‑time assertion: at most one lead-blank-* feature enabled.
+const _: () = assert!(
+    (cfg!(feature = "lead-blank-1") as usize)
+        + (cfg!(feature = "lead-blank-2") as usize)
+        + (cfg!(feature = "lead-blank-4") as usize)
+        + (cfg!(feature = "lead-blank-8") as usize)
+        + (cfg!(feature = "lead-blank-16") as usize)
+        + (cfg!(feature = "lead-blank-32") as usize)
+        <= 1,
+    "lead-blank-* features are mutually exclusive"
+);
+
+#[cfg(feature = "lead-blank-1")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 1;
+#[cfg(feature = "lead-blank-2")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 2;
+#[cfg(feature = "lead-blank-4")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 4;
+#[cfg(feature = "lead-blank-8")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 8;
+#[cfg(feature = "lead-blank-16")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 16;
+#[cfg(feature = "lead-blank-32")]
+pub(crate) const LEAD_BLANK_DELAY: usize = 32;
+
+#[cfg(not(any(
+    feature = "lead-blank-1",
+    feature = "lead-blank-2",
+    feature = "lead-blank-4",
+    feature = "lead-blank-8",
+    feature = "lead-blank-16",
+    feature = "lead-blank-32"
+)))]
+pub(crate) const LEAD_BLANK_DELAY: usize = 0;
+
+// Compile‑time assertion: at most one trail-blank-* feature enabled.
+const _: () = assert!(
+    (cfg!(feature = "trail-blank-1") as usize)
+        + (cfg!(feature = "trail-blank-2") as usize)
+        + (cfg!(feature = "trail-blank-4") as usize)
+        + (cfg!(feature = "trail-blank-8") as usize)
+        + (cfg!(feature = "trail-blank-16") as usize)
+        + (cfg!(feature = "trail-blank-32") as usize)
+        <= 1,
+    "trail-blank-* features are mutually exclusive"
+);
+
+#[cfg(feature = "trail-blank-1")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 1;
+#[cfg(feature = "trail-blank-2")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 2;
+#[cfg(feature = "trail-blank-4")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 4;
+#[cfg(feature = "trail-blank-8")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 8;
+#[cfg(feature = "trail-blank-16")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 16;
+#[cfg(feature = "trail-blank-32")]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 32;
+
+#[cfg(not(any(
+    feature = "trail-blank-1",
+    feature = "trail-blank-2",
+    feature = "trail-blank-4",
+    feature = "trail-blank-8",
+    feature = "trail-blank-16",
+    feature = "trail-blank-32"
+)))]
+pub(crate) const TRAIL_BLANK_DELAY: usize = 0;
+
+// Compile‑time assertion: at most one inter-row-blank-* feature enabled.
+const _: () = assert!(
+    (cfg!(feature = "inter-row-blank-4") as usize)
+        + (cfg!(feature = "inter-row-blank-8") as usize)
+        + (cfg!(feature = "inter-row-blank-16") as usize)
+        + (cfg!(feature = "inter-row-blank-32") as usize)
+        <= 1,
+    "inter-row-blank-* features are mutually exclusive"
+);
+
+#[cfg(feature = "inter-row-blank-4")]
+pub(crate) const INTER_ROW_BLANK: usize = 4;
+#[cfg(feature = "inter-row-blank-8")]
+pub(crate) const INTER_ROW_BLANK: usize = 8;
+#[cfg(feature = "inter-row-blank-16")]
+pub(crate) const INTER_ROW_BLANK: usize = 16;
+#[cfg(feature = "inter-row-blank-32")]
+pub(crate) const INTER_ROW_BLANK: usize = 32;
+
+#[cfg(not(any(
+    feature = "inter-row-blank-4",
+    feature = "inter-row-blank-8",
+    feature = "inter-row-blank-16",
+    feature = "inter-row-blank-32"
+)))]
+pub(crate) const INTER_ROW_BLANK: usize = 0;
+
 /// A single segment of the BCM scan sequence.
 ///
 /// The driver walks an ordered sequence of segments, sending each one `reps`

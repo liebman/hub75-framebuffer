@@ -68,71 +68,7 @@ pub mod row;
 
 pub use frame::DmaFrameBuffer;
 
-// ---------------------------------------------------------------------------
-// Feature-gated constants shared by both layout variants
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "lead-blank-1")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 1;
-#[cfg(feature = "lead-blank-2")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 2;
-#[cfg(feature = "lead-blank-4")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 4;
-#[cfg(feature = "lead-blank-8")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 8;
-#[cfg(feature = "lead-blank-16")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 16;
-#[cfg(feature = "lead-blank-32")]
-pub(crate) const LEAD_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "lead-blank-1",
-    feature = "lead-blank-2",
-    feature = "lead-blank-4",
-    feature = "lead-blank-8",
-    feature = "lead-blank-16",
-    feature = "lead-blank-32"
-)))]
-pub(crate) const LEAD_BLANK_DELAY: usize = 1;
-
-#[cfg(feature = "trail-blank-1")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 1;
-#[cfg(feature = "trail-blank-2")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 2;
-#[cfg(feature = "trail-blank-4")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 4;
-#[cfg(feature = "trail-blank-8")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 8;
-#[cfg(feature = "trail-blank-16")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 16;
-#[cfg(feature = "trail-blank-32")]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 32;
-
-#[cfg(not(any(
-    feature = "trail-blank-1",
-    feature = "trail-blank-2",
-    feature = "trail-blank-4",
-    feature = "trail-blank-8",
-    feature = "trail-blank-16",
-    feature = "trail-blank-32"
-)))]
-pub(crate) const TRAIL_BLANK_DELAY: usize = 1;
-
-#[cfg(feature = "inter-row-blank-4")]
-pub(crate) const INTER_ROW_BLANK: usize = 4;
-#[cfg(feature = "inter-row-blank-8")]
-pub(crate) const INTER_ROW_BLANK: usize = 8;
-#[cfg(feature = "inter-row-blank-16")]
-pub(crate) const INTER_ROW_BLANK: usize = 16;
-#[cfg(feature = "inter-row-blank-32")]
-pub(crate) const INTER_ROW_BLANK: usize = 32;
-#[cfg(not(any(
-    feature = "inter-row-blank-4",
-    feature = "inter-row-blank-8",
-    feature = "inter-row-blank-16",
-    feature = "inter-row-blank-32"
-)))]
-pub(crate) const INTER_ROW_BLANK: usize = 0;
+pub(crate) use crate::{INTER_ROW_BLANK, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
 
 #[cfg(not(feature = "invert-oe"))]
 pub(crate) const OE_ACTIVE: u16 = 0b1_0000_0000;
