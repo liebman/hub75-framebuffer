@@ -157,6 +157,7 @@ const OE_BLANK: u16 = 0b1_0000_0000;
 /// This template contains all the timing and control signals but no pixel data.
 /// The address remains constant across all entries (including the latch pixel)
 /// so that the address change is deferred to the first pixel of the next row.
+#[allow(clippy::absurd_extreme_comparisons)]
 #[inline]
 const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];

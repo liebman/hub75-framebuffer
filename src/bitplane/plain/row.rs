@@ -227,6 +227,7 @@ const fn segment_shapes<const COLS: usize, const PLANES: usize>(
 ///   (address change to next row follows).
 /// - The latch entry (last pixel) always has OE blanked — many HUB75 driver ICs
 ///   require OE to be inactive during latch for reliable data transfer.
+#[allow(clippy::absurd_extreme_comparisons)]
 #[inline]
 const fn make_row_plane_template<const COLS: usize>(
     addr: u8,

@@ -98,6 +98,7 @@ pub(crate) const fn map_index(i: usize) -> usize {
 
 /// Builds the per-row pixel template with trail blank, active pixels, lead
 /// blank, and latch embedded within the COLS entries.
+#[allow(clippy::absurd_extreme_comparisons)]
 #[inline]
 pub(crate) const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; COLS] {
     let mut data = [Entry::new(); COLS];
