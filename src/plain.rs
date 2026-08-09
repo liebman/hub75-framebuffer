@@ -489,7 +489,9 @@ impl<
     ///
     /// # Panics
     ///
-    /// Panics if `BITS` is greater than 8, as only 1-8 bit color depths are supported.
+    /// Panics if `BITS` is greater than 8, as only 1-8 bit color depths are
+    /// supported. With the `esp32-ordering` feature, also panics if `COLS` is
+    /// not even (the ESP32's byte-order swap requires an even column count).
     ///
     /// # Example
     /// ```rust,no_run
@@ -507,6 +509,11 @@ impl<
     #[must_use]
     pub const fn new() -> Self {
         assert!(BITS <= 8);
+        #[cfg(feature = "esp32-ordering")]
+        assert!(
+            COLS % 2 == 0,
+            "esp32-ordering feature requires COLS to be even"
+        );
 
         let mut instance = Self {
             _align: 0,

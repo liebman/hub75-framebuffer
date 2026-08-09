@@ -150,12 +150,20 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     ///
     /// # Panics
     /// Panics if `NROWS` is not within `1..=32` (5-bit row address) or
-    /// `PLANES` is not within `1..=8` (8-bit color depth). In const contexts
-    /// (e.g. `static` framebuffers) this is a compile-time error.
+    /// `PLANES` is not within `1..=8` (8-bit color depth). With the
+    /// `esp32-ordering` feature, also panics if `COLS` is not divisible
+    /// by 4 (the ESP32's byte-order rearrangement requires column counts
+    /// that are multiples of 4). In const contexts (e.g. `static`
+    /// framebuffers) this is a compile-time error.
     #[must_use]
     pub const fn new() -> Self {
         assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
         assert!(PLANES >= 1 && PLANES <= 8, "PLANES must be within 1..=8");
+        #[cfg(feature = "esp32-ordering")]
+        assert!(
+            COLS % 4 == 0,
+            "esp32-ordering feature requires COLS to be divisible by 4"
+        );
         let mut instance = Self {
             planes: [[Row::new(); NROWS]; PLANES],
         };

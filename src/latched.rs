@@ -546,6 +546,13 @@ impl<
 {
     /// Create a new framebuffer with the given number of frames.
     /// The framebuffer is automatically formatted and ready to use.
+    ///
+    /// # Panics
+    ///
+    /// With the `esp32-ordering` feature, panics if `COLS` is not
+    /// divisible by 4 (the ESP32's byte-order rearrangement requires
+    /// column counts that are multiples of 4).
+    ///
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{latched::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -561,6 +568,11 @@ impl<
     /// ```
     #[must_use]
     pub const fn new() -> Self {
+        #[cfg(feature = "esp32-ordering")]
+        assert!(
+            COLS % 4 == 0,
+            "esp32-ordering feature requires COLS to be divisible by 4"
+        );
         let mut fb = Self {
             frames: [Frame::new(); FRAME_COUNT],
         };
