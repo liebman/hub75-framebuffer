@@ -549,6 +549,11 @@ impl<
 }
 
 #[allow(deprecated)]
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         T,
         F: ReadBuffer<Word = T>,
@@ -800,6 +805,11 @@ impl<F: FrameBufferOperations + FrameBuffer, M: PixelRemapper> FrameBufferOperat
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for RemappedFrameBuffer<F, M> {
     type Word = T;
 
@@ -1089,6 +1099,7 @@ mod tests {
 
     impl MutableFrameBuffer for TestFrameBuffer {}
 
+    #[allow(deprecated)]
     unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
         type Word = u8;
 

@@ -397,12 +397,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Number of bit-planes.
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
 
     /// Byte size of one plane's pixel row.
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         COLS * core::mem::size_of::<Entry>()
     }
@@ -1118,6 +1120,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn bcm_const_fns_return_expected_values() {
         assert_eq!(TestBuffer::bcm_chunk_count(), TEST_PLANES);
         assert_eq!(

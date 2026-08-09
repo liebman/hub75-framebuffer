@@ -527,6 +527,7 @@ impl<
     /// Returns the number of BCM chunks in this framebuffer (always 1 for
     /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_count() -> usize {
         1
     }
@@ -535,6 +536,7 @@ impl<
     /// this equals the total DMA buffer size including the tail word, since BCM
     /// weighting is baked in).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>()
     }
@@ -734,6 +736,11 @@ impl<
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -751,6 +758,11 @@ unsafe impl<
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -1230,6 +1242,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_bcm_chunk_info() {
         let expected_size =
             core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
@@ -1688,6 +1701,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_read_buffer_implementation() {
         // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
         let fb = TestFrameBuffer::new();
@@ -1736,6 +1750,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_read_buffer_owned_implementation() {
         // This test specifically ensures the owned ReadBuffer implementation is tested
         // by consuming the framebuffer and testing the pointer validity

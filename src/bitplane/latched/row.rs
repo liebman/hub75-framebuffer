@@ -335,6 +335,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Number of bit-planes.
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
@@ -342,6 +343,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// Byte size of one plane's payload for a single row (pixel data plus
     /// its four address bytes).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<PlaneRow<COLS>>()
     }

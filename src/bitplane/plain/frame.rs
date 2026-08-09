@@ -192,12 +192,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Returns the number of BCM chunks (one per bit-plane).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
 
     /// Returns the byte size of one BCM chunk (a single bit-plane including tail word).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<PlaneData<NROWS, COLS>>()
     }
@@ -601,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn bcm_chunk_info_for_common_panel() {
         assert_eq!(TestBuffer::bcm_chunk_count(), 8);
         assert_eq!(

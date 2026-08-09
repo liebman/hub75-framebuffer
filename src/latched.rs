@@ -583,6 +583,7 @@ impl<
     /// Returns the number of BCM chunks in this framebuffer (always 1 for
     /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_count() -> usize {
         1
     }
@@ -590,6 +591,7 @@ impl<
     /// Returns the byte size of one BCM chunk (for single-plane framebuffers
     /// this equals the total DMA buffer size, since BCM weighting is baked in).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
@@ -760,6 +762,11 @@ impl<
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -777,6 +784,11 @@ unsafe impl<
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -1248,6 +1260,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_bcm_chunk_info() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
