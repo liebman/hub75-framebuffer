@@ -382,6 +382,9 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
         I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
     {
         for pixel in pixels {
+            if pixel.0.x < 0 || pixel.0.y < 0 {
+                continue;
+            }
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
