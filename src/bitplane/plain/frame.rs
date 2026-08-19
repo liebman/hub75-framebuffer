@@ -39,7 +39,7 @@ use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
 use crate::{map_row_index, slot_addresses};
-use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
+use crate::{BcmLenReps, FrameBuffer, BCM_SEQUENCE_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 use super::{make_data_template, map_index, Entry, INTER_ROW_BLANK, OE_BLANK};
@@ -125,11 +125,11 @@ impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
     }
 }
 
-/// Shape of the coalesced BCM segment for plane `plane_idx`: returns
+/// Coalesced BCM suffix for plane `plane_idx`: returns
 /// `(covered_planes, reps)` — how many planes the segment spans (starting at
 /// `plane_idx`) and how many times that suffix is streamed. See the
 /// module-level "DMA Descriptor Pattern" section for the full scheme.
-const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
+const fn plane_suffix(plane_idx: usize, planes: usize) -> (usize, usize) {
     let covered = planes - plane_idx;
     let reps = if plane_idx == 0 {
         1
@@ -139,21 +139,24 @@ const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
     (covered, reps)
 }
 
-/// `(len, reps)` shapes of the single BCM sequence (the whole frame), in
-/// scan order: one segment per plane, each streaming the contiguous plane
-/// suffix `plane..PLANES`. Entries past `PLANES` are `(0, 0)` padding.
-const fn segment_shapes<const NROWS: usize, const COLS: usize, const PLANES: usize>(
-) -> [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] {
-    assert!(PLANES <= BCM_SEGMENT_SHAPES_CAPACITY);
+/// BCM sequence for one complete frame: one entry per plane, each streaming
+/// the contiguous plane suffix `plane..PLANES`. Entries past `PLANES` are
+/// zero padding.
+const fn bcm_sequence<const NROWS: usize, const COLS: usize, const PLANES: usize>(
+) -> [BcmLenReps; BCM_SEQUENCE_CAPACITY] {
+    assert!(PLANES <= BCM_SEQUENCE_CAPACITY);
     let plane_bytes = core::mem::size_of::<PlaneData<NROWS, COLS>>();
-    let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
+    let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
     let mut plane = 0usize;
     while plane < PLANES {
-        let (covered, reps) = plane_seg_shape(plane, PLANES);
-        shapes[plane] = (plane_bytes * covered, reps);
+        let (covered, reps) = plane_suffix(plane, PLANES);
+        seq[plane] = BcmLenReps {
+            len: plane_bytes * covered,
+            reps,
+        };
         plane += 1;
     }
-    shapes
+    seq
 }
 
 /// Plane-major BCM framebuffer (per-plane storage).
@@ -192,14 +195,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Returns the number of BCM chunks (one per bit-plane).
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
 
     /// Returns the byte size of one BCM chunk (a single bit-plane including tail word).
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<PlaneData<NROWS, COLS>>()
     }
@@ -324,25 +327,19 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u16;
 
-    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] =
-        segment_shapes::<NROWS, COLS, PLANES>();
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] =
+        bcm_sequence::<NROWS, COLS, PLANES>();
 
     const BCM_SEQUENCE_LEN: usize = PLANES;
 
     const BCM_SEQUENCE_COUNT: usize = 1;
 
-    fn bcm_segment(&self, index: usize) -> BcmSegment {
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
         assert!(
             index < PLANES,
             "segment index {index} out of range for {PLANES} planes"
         );
-        // Plane k: stream the contiguous plane suffix k..PLANES (embedded
-        // per-row gaps and per-plane tail words included) just enough times
-        // to bring plane k's total coverage to 2^k.
-        let ptr = (&raw const self.planes[index]).cast::<u8>();
-        let (covered, reps) = plane_seg_shape(index, PLANES);
-        let len = core::mem::size_of::<PlaneData<NROWS, COLS>>() * covered;
-        BcmSegment { ptr, len, reps }
+        (&raw const self.planes[index]).cast::<u8>()
     }
 }
 
@@ -831,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn bcm_segment_shapes_match_runtime_segments() {
+    fn bcm_sequence_matches_runtime_segments() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
         assert_eq!(
@@ -848,13 +845,13 @@ mod tests {
             0
         );
         for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
-            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_SEQUENCE_LEN];
+            let entry = TestBuffer::BCM_SEQUENCE[i % TestBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
-            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_SEQUENCE_LEN..] {
-            assert_eq!((len, reps), (0, 0), "padding must be zero");
+        for entry in &TestBuffer::BCM_SEQUENCE[TestBuffer::BCM_SEQUENCE_LEN..] {
+            assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
 }

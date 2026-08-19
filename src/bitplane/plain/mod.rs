@@ -43,10 +43,11 @@
 //!
 //! # Bitplane BCM Rendering
 //! Each framebuffer is organised into `PLANES` bit-planes, one per colour
-//! bit. To produce correct brightness via Binary Code Modulation, configure
-//! the DMA descriptor chain so that each plane's data is output (scanned) a
-//! number of times equal to its bit-weight (2^7 for the MSB plane down to
-//! 2^0 for the LSB plane).
+//! bit. To produce correct brightness via Binary Code Modulation, output each
+//! plane's data (scan it) a number of times equal to its bit-weight (2^7 for
+//! the MSB plane down to 2^0 for the LSB plane) — either with a DMA
+//! descriptor chain or by reprogramming the DMA registers per segment from a
+//! transfer-complete interrupt.
 //!
 //! Both layout variants store planes **LSB-first**: plane 0 carries bit 0
 //! and is displayed once per scan, plane 7 carries bit 7 and is displayed

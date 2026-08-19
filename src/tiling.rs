@@ -16,8 +16,8 @@
 use core::{convert::Infallible, marker::PhantomData};
 
 use crate::{
-    BcmSegment, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer,
-    BCM_SEGMENT_SHAPES_CAPACITY,
+    BcmLenReps, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer,
+    BCM_SEQUENCE_CAPACITY,
 };
 use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
@@ -615,7 +615,7 @@ impl<
 {
     type Word = F::Word;
 
-    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = F::BCM_SEQUENCE;
 
     const BCM_SEQUENCE_LEN: usize = F::BCM_SEQUENCE_LEN;
 
@@ -623,8 +623,8 @@ impl<
 
     const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
-    fn bcm_segment(&self, index: usize) -> BcmSegment {
-        self.0.bcm_segment(index)
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
+        self.0.bcm_segment_ptr(index)
     }
 }
 
@@ -821,7 +821,7 @@ unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for Remappe
 impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M> {
     type Word = F::Word;
 
-    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = F::BCM_SEGMENT_SHAPES;
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = F::BCM_SEQUENCE;
 
     const BCM_SEQUENCE_LEN: usize = F::BCM_SEQUENCE_LEN;
 
@@ -829,8 +829,8 @@ impl<F: FrameBuffer, M: PixelRemapper> FrameBuffer for RemappedFrameBuffer<F, M>
 
     const BCM_SEGMENTS_PER_GROUP: usize = F::BCM_SEGMENTS_PER_GROUP;
 
-    fn bcm_segment(&self, index: usize) -> BcmSegment {
-        self.0.bcm_segment(index)
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
+        self.0.bcm_segment_ptr(index)
     }
 }
 
@@ -1067,23 +1067,19 @@ mod tests {
     impl FrameBuffer for TestFrameBuffer {
         type Word = u8;
 
-        const BCM_SEGMENT_SHAPES: [(usize, usize); crate::BCM_SEGMENT_SHAPES_CAPACITY] = {
-            let mut shapes = [(0usize, 0usize); crate::BCM_SEGMENT_SHAPES_CAPACITY];
-            shapes[0] = (8, 1);
-            shapes
+        const BCM_SEQUENCE: [crate::BcmLenReps; crate::BCM_SEQUENCE_CAPACITY] = {
+            let mut seq = [crate::BcmLenReps::ZERO; crate::BCM_SEQUENCE_CAPACITY];
+            seq[0] = crate::BcmLenReps { len: 8, reps: 1 };
+            seq
         };
 
         const BCM_SEQUENCE_LEN: usize = 1;
 
         const BCM_SEQUENCE_COUNT: usize = 1;
 
-        fn bcm_segment(&self, index: usize) -> BcmSegment {
+        fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
             assert!(index == 0);
-            BcmSegment {
-                ptr: self.buf.as_ptr(),
-                len: self.buf.len(),
-                reps: 1,
-            }
+            self.buf.as_ptr()
         }
     }
 

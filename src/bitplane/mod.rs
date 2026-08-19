@@ -1,10 +1,12 @@
 //! Bitplane-oriented framebuffer implementations for HUB75 LED panels.
 //!
 //! These framebuffers store colour data as one bit-plane per colour bit
-//! (typically 8 planes for full 8-bit colour). To render, configure the DMA
-//! descriptor chain to output each plane a number of times equal to its
-//! bit-weight (the MSB plane 2^7 times, the LSB plane once) so that the
-//! weighted repetition counts produce correct BCM brightness.
+//! (typically 8 planes for full 8-bit colour). To render, output each plane a
+//! number of times equal to its bit-weight (the MSB plane 2^7 times, the LSB
+//! plane once) — either with a DMA descriptor chain or by reprogramming the
+//! DMA address/length registers per segment from a transfer-complete
+//! interrupt — so that the weighted repetition counts produce correct BCM
+//! brightness.
 //!
 //! All layouts store planes **LSB-first** (plane 0 = LSB), and each BCM
 //! segment streams a contiguous *suffix* of planes, repeated just enough

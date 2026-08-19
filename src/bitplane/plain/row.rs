@@ -114,7 +114,7 @@ use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
 use crate::Color;
 use crate::{map_row_index, slot_addresses};
-use crate::{BcmSegment, FrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY};
+use crate::{BcmLenReps, FrameBuffer, BCM_SEQUENCE_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 use super::{
@@ -163,7 +163,7 @@ const HAS_GAP: bool = GAP_BYTES > 0;
 #[allow(clippy::absurd_extreme_comparisons)]
 const HAS_TRAILER: bool = TRAILER_BYTES > 0;
 
-/// Shape of the coalesced BCM segment for plane `plane_idx`: returns
+/// Coalesced BCM suffix for plane `plane_idx`: returns
 /// `(covered_planes, reps)` — how many planes the segment spans (starting at
 /// `plane_idx`) and how many times that suffix is streamed. See the
 /// module-level "DMA Descriptor Pattern" section for the full scheme.
@@ -171,7 +171,7 @@ const HAS_TRAILER: bool = TRAILER_BYTES > 0;
 /// With an inter-row gap, plane 0 stands alone (the gap segment is streamed
 /// between plane 0 and plane 1), so plane 1's segment needs 2 reps to
 /// preserve its weight.
-const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
+const fn plane_suffix(plane_idx: usize, planes: usize) -> (usize, usize) {
     let covered = if HAS_GAP && plane_idx == 0 {
         1
     } else {
@@ -187,36 +187,36 @@ const fn plane_seg_shape(plane_idx: usize, planes: usize) -> (usize, usize) {
     (covered, reps)
 }
 
-/// `(len, reps)` shapes of one BCM sequence (a single row), in scan
-/// order: one segment per plane (each streaming the contiguous plane suffix
-/// `plane..PLANES`), plus the inter-row gap and end-of-row trailer segments
-/// when enabled. Entries past the sequence are `(0, 0)` padding.
+/// BCM sequence for one row: one entry per plane (each streaming the
+/// contiguous plane suffix `plane..PLANES`), plus the inter-row gap and
+/// end-of-row trailer segments when enabled. Entries past the sequence are
+/// zero padding.
 #[allow(clippy::absurd_extreme_comparisons)]
-const fn segment_shapes<const COLS: usize, const PLANES: usize>(
-) -> [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] {
+const fn bcm_sequence<const COLS: usize, const PLANES: usize>(
+) -> [BcmLenReps; BCM_SEQUENCE_CAPACITY] {
     let gap = HAS_GAP as usize;
     let trailer = HAS_TRAILER as usize;
     let seq_len = PLANES + gap + trailer;
-    assert!(seq_len <= BCM_SEGMENT_SHAPES_CAPACITY);
+    assert!(seq_len <= BCM_SEQUENCE_CAPACITY);
     let plane_bytes = COLS * core::mem::size_of::<Entry>();
-    let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
+    let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
     let mut within = 0usize;
     while within < seq_len {
-        let shape = if within == 0 {
-            let (covered, reps) = plane_seg_shape(0, PLANES);
-            (plane_bytes * covered, reps)
+        let entry = if within == 0 {
+            let (covered, reps) = plane_suffix(0, PLANES);
+            BcmLenReps { len: plane_bytes * covered, reps }
         } else if HAS_GAP && within == 1 {
-            (GAP_BYTES, 1)
+            BcmLenReps { len: GAP_BYTES, reps: 1 }
         } else if within < PLANES + gap {
-            let (covered, reps) = plane_seg_shape(within - gap, PLANES);
-            (plane_bytes * covered, reps)
+            let (covered, reps) = plane_suffix(within - gap, PLANES);
+            BcmLenReps { len: plane_bytes * covered, reps }
         } else {
-            (TRAILER_BYTES, 1)
+            BcmLenReps { len: TRAILER_BYTES, reps: 1 }
         };
-        shapes[within] = shape;
+        seq[within] = entry;
         within += 1;
     }
-    shapes
+    seq
 }
 
 /// Builds a per-plane pixel template for the row-major layout.
@@ -397,14 +397,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Number of bit-planes.
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
 
     /// Byte size of one plane's pixel row.
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         COLS * core::mem::size_of::<Entry>()
     }
@@ -592,8 +592,8 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u16;
 
-    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] =
-        segment_shapes::<COLS, PLANES>();
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] =
+        bcm_sequence::<COLS, PLANES>();
 
     const BCM_SEQUENCE_LEN: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
 
@@ -601,7 +601,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 
     const BCM_SEGMENTS_PER_GROUP: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
 
-    fn bcm_segment(&self, index: usize) -> BcmSegment {
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
         let gap = usize::from(HAS_GAP);
         let trailer = usize::from(HAS_TRAILER);
         let segments_per_row = PLANES + gap + trailer;
@@ -612,36 +612,18 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
         let row_idx = index / segments_per_row;
         let within_row = index % segments_per_row;
         if within_row == 0 {
-            // Plane 0 (LSB, prev_addr): 1 rep. Without an inter-row gap this
-            // segment streams the whole contiguous plane block (all planes,
-            // one pass); with a gap it covers plane 0 only and the gap
-            // segment follows.
-            let (ptr, plane_len) = self.pixel_row_ptr_len(row_idx, 0);
-            let (covered, reps) = plane_seg_shape(0, PLANES);
-            BcmSegment {
-                ptr,
-                len: plane_len * covered,
-                reps,
-            }
+            let (ptr, _) = self.pixel_row_ptr_len(row_idx, 0);
+            ptr
         } else if HAS_GAP && within_row == 1 {
-            // Inter-row gap: blanked dead clocks between plane 0's latch
-            // and the address change at plane 1's first pixel.
-            let (ptr, len) = self.gap_ptr_len(row_idx);
-            BcmSegment { ptr, len, reps: 1 }
+            let (ptr, _) = self.gap_ptr_len(row_idx);
+            ptr
         } else if within_row < PLANES + gap {
-            // Plane k: stream the contiguous plane suffix k..PLANES just
-            // enough times to bring plane k's total coverage to 2^k.
             let plane_idx = within_row - gap;
-            let (ptr, plane_len) = self.pixel_row_ptr_len(row_idx, plane_idx);
-            let (covered, reps) = plane_seg_shape(plane_idx, PLANES);
-            BcmSegment {
-                ptr,
-                len: plane_len * covered,
-                reps,
-            }
+            let (ptr, _) = self.pixel_row_ptr_len(row_idx, plane_idx);
+            ptr
         } else {
-            let (ptr, len) = self.trailer_ptr_len(row_idx);
-            BcmSegment { ptr, len, reps: 1 }
+            let (ptr, _) = self.trailer_ptr_len(row_idx);
+            ptr
         }
     }
 }
@@ -1515,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn bcm_segment_shapes_match_runtime_segments() {
+    fn bcm_sequence_matches_runtime_segments() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
         assert_eq!(
@@ -1532,13 +1514,13 @@ mod tests {
             0
         );
         for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
-            let (len, reps) = TestBuffer::BCM_SEGMENT_SHAPES[i % TestBuffer::BCM_SEQUENCE_LEN];
+            let entry = TestBuffer::BCM_SEQUENCE[i % TestBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
-            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in &TestBuffer::BCM_SEGMENT_SHAPES[TestBuffer::BCM_SEQUENCE_LEN..] {
-            assert_eq!((len, reps), (0, 0), "padding must be zero");
+        for entry in &TestBuffer::BCM_SEQUENCE[TestBuffer::BCM_SEQUENCE_LEN..] {
+            assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
 

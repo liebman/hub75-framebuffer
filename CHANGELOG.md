@@ -13,20 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * The `FrameBuffer` trait's plane-oriented API was replaced by a BCM
   segment API. **Removed:** `plane_count()`, `plane_ptr_len()`, and
-  `get_word_size()`. **Added:** required associated constants
-  `BCM_SEGMENT_SHAPES` (the `(len, reps)` segment shapes of one
-  *sequence* — the repeating unit of the scan — padded to
-  `BCM_SEGMENT_SHAPES_CAPACITY`), `BCM_SEQUENCE_LEN`, and
-  `BCM_SEQUENCE_COUNT`, plus a required method
-  `bcm_segment(index) -> BcmSegment` (`BcmSegment` is a new public struct
-  with `ptr`, `len`, and `reps` fields). `BCM_SEGMENT_COUNT` (default
+  `get_word_size()`. **Added:** a new `BcmLenReps` struct (`len`, `reps`),
+  required associated constant `BCM_SEQUENCE` (a `[BcmLenReps;
+  BCM_SEQUENCE_CAPACITY]` array describing one repeating period),
+  `BCM_SEQUENCE_LEN`, and `BCM_SEQUENCE_COUNT`, plus a required method
+  `bcm_segment_ptr(index) -> *const u8`. `bcm_segment(index) -> BcmSegment`
+  is now a **provided** method that combines `bcm_segment_ptr()` with the
+  static `(len, reps)` from `BCM_SEQUENCE`. `BCM_SEGMENT_COUNT` (default
   `BCM_SEQUENCE_LEN * BCM_SEQUENCE_COUNT`) and `BCM_SEGMENTS_PER_GROUP`
   (default `1`) are optional overrides; `bcm_segment_count()` /
   `bcm_segments_per_group()` are provided methods reading the constants.
+  A free const fn `bcm_rep_count::<FB>()` computes the total repetition
+  count across a full refresh.
 
   **Migration:** downstream `FrameBuffer` implementors must delete their
-  `plane_count()` / `plane_ptr_len()` implementations and add the new
-  constants and `bcm_segment()`. Drivers that iterated planes via
+  `plane_count()` / `plane_ptr_len()` implementations and add `BCM_SEQUENCE`
+  plus `bcm_segment_ptr()`. Drivers that iterated planes via
   `plane_ptr_len()` must now iterate `bcm_segment(0..bcm_segment_count())`,
   streaming `reps` transfers of `len` bytes from `ptr` per segment.
 
@@ -52,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Migration:** drivers must no longer assume one segment == one plane: a
   segment's `len` may exceed the platform's maximum DMA transfer size, so
   on such platforms a segment must be split across multiple DMA
-  descriptors (`BCM_SEGMENT_SHAPES` exposes the static `len`/`reps` data
+  descriptors (`BCM_SEQUENCE` exposes the static `len`/`reps` data
   needed to size descriptor tables at compile time). Per-group ISR cadence
   is unchanged (`PLANES` groups per frame), but inter-ISR intervals
   changed, and the longest contiguous single-plane (MSB) run per frame is

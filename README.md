@@ -32,26 +32,44 @@ documentation contains an extensive primer.
 
 ---
 
-## Two framebuffer flavors
+## Framebuffer flavors
 
-| Module              | Extra hardware | Word size | Memory use | Pros / Cons |
-|---------------------|----------------|-----------|------------|-------------|
-| `plain`             | none           | 16 bit (14 used) | high       | Simplest, wires exactly like a standard HUB75 matrix. |
-| `latched`           | **external latch gate** (see below) | 8 bit | ×½ of `plain` | Lower memory footprint, but needs a tiny glue-logic board. |
+The recommended layouts are the **bitplane** framebuffers.  The older
+threshold-frame layouts (`plain`, `latched`) are **deprecated** and kept only
+for legacy drivers whose DMA can stream a single circular buffer but cannot
+raise interrupts.
+
+| Module | Extra hardware | Word size | BCM strategy | Memory use | DMA requirements |
+|--------|----------------|-----------|--------------|------------|------------------|
+| `bitplane::plain` (`frame`/`row` layouts) | none | 16 bit | true bitplanes | linear in `PLANES` | per-segment repetition (descriptor chain or ISR) |
+| `bitplane::latched` (`frame`/`row` layouts) | **external latch gate** (see below) | 8 bit | true bitplanes | linear in `PLANES` | per-segment repetition (descriptor chain or ISR) |
+| `plain` *(deprecated)* | none | 16 bit (14 used) | threshold frames | high: `2^BITS − 1` frames | single circular transfer |
+| `latched` *(deprecated)* | **external latch gate** (see below) | 8 bit | threshold frames | ×½ of `plain` | single circular transfer |
+
+*Bitplane* framebuffers store one bit-plane per color bit and produce
+brightness by streaming each plane a number of times equal to its binary
+weight — memory grows linearly with color depth, and the `frame` (plane-major)
+and `row` (row-major) layouts let you pick the DMA cadence; see
+[Driving the panel](#driving-the-panel-dma-integration).  The deprecated
+*threshold* framebuffers instead bake all brightness timing into one
+contiguous memory image (`2^BITS − 1` frames), which any circular DMA can
+stream but costs exponentially more RAM.
 
 ## Multiple Panels
 
-- Use `tiling::TiledFrameBuffer` to drive several HUB75 panels as one large display.
-- Combine it with a pixel-remapping policy like `ChainTopRightDown` and any of
-  the framebuffers above (plain or latched).
+- Use `tiling::RemappedFrameBuffer` to drive several HUB75 panels as one large
+  display (the older `TiledFrameBuffer` is deprecated).
+- Combine it with a pixel-remapping policy like `ChainTopRightDown` (tiled
+  panels) or `QuarterScan` (1/16-scan panels) and any of the framebuffers above.
 - The wrapper exposes a single `embedded-graphics` canvas, so a 3 × 3 stack of
   64 × 32 panels simply looks like a 192 × 96 screen while all coordinate translation happens transparently.
 
 ### The latch circuit
 
-The *latched* implementation assumes a small external circuit that holds the
-row address while gating the pixel clock.  A typical solution uses a 74xx373
-latch along with a few NAND gates:
+The *latched* implementations (`bitplane::latched`, and the deprecated
+`latched`) assume a small external circuit that holds the row address while
+gating the pixel clock.  A typical solution uses a 74xx373 latch along with a
+few NAND gates:
 
 ![Latch circuit block diagram](images/latch-circuit.png)
 
@@ -74,19 +92,17 @@ hub75-framebuffer = "0.11.0"
 ### Choose your parameters
 
 ```rust
-use hub75_framebuffer::{compute_frame_count, compute_rows};
-use hub75_framebuffer::latched::DmaFrameBuffer; 
-// or ::plain::DmaFrameBuffer
+use hub75_framebuffer::compute_rows;
+use hub75_framebuffer::bitplane::plain::DmaFrameBuffer;
+// or ::bitplane::latched::DmaFrameBuffer (8-bit bus + latch circuit)
 
-const ROWS:       usize = 32;              // panel height
-const COLS:       usize = 64;              // panel width
-const BITS:       u8    = 3;               // colour depth ⇒ 7 BCM frames
-const NROWS:      usize = compute_rows(ROWS);          // 16
-const FRAME_COUNT:usize = compute_frame_count(BITS);   // (1<<BITS)-1 = 7
+const ROWS:   usize = 32;                 // panel height
+const COLS:   usize = 64;                 // panel width
+const NROWS:  usize = compute_rows(ROWS); // 16 row pairs
+const PLANES: usize = 8;                  // colour depth: 1..=8 bits per channel
 
 // Create a framebuffer (already initialized/cleared)
-let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-    ::new();
+let mut framebuffer = DmaFrameBuffer::<NROWS, COLS, PLANES>::new();
 ```
 
 You can now draw using any `embedded-graphics` primitive:
@@ -107,23 +123,76 @@ Circle::new(Point::new(20, 10), 8)
     .unwrap();
 ```
 
-Finally hand the raw DMA buffer off to your MCU's parallel peripheral.
+Finally, stream the framebuffer to the panel with your MCU's parallel output
+peripheral — see [Driving the panel](#driving-the-panel-dma-integration).
+
+---
+
+## Driving the panel (DMA integration)
+
+This crate is **buffer-only**: it builds the memory image and describes exactly
+what to stream via the `FrameBuffer` trait — writing the peripheral driver
+(the refresh loop) is up to you.  A driver only needs two things from a
+framebuffer:
+
+- `FrameBuffer::Word` — the stream element type: `u16` for the `plain`
+  variants, `u8` for the `latched` ones.  Your peripheral must output this
+  many bits in parallel and generates the pixel clock (`CLK`) itself.
+- `FrameBuffer::BCM_SEQUENCE` / `FrameBuffer::bcm_segment(i)` — the ordered
+  `(ptr, len, reps)` segments that make up one complete panel refresh.
+
+The framebuffer must live in DMA-capable memory and outlive the transfer:
+place it in a `static` (or a DMA RAM section on chips that require one) and
+apply whatever alignment and cache maintenance your MCU needs.
+
+### DMA with descriptor chains (least CPU)
+
+The bitplane stream is non-uniform: each segment must be output `reps` times
+(the MSB plane up to `2^(PLANES-2)` times).  This maps naturally onto DMA
+descriptor chains (e.g. ESP32 GPDMA linked-list mode) — use `BCM_SEQUENCE` /
+`bcm_rep_count()` to size the descriptor table at compile time and
+`bcm_segment(i)` to populate it; a segment whose `len` exceeds your DMA's
+maximum transfer size is simply split across several descriptors.  The
+`bitplane::*` module docs show the exact descriptor pattern per layout.  Link
+the chain into a loop and the panel refreshes forever with zero CPU
+involvement.  For free-running loops, consider the `tail-closes-latch`
+feature so `LAT` is not left asserted when the chain wraps around.
+
+### Simple DMA (registers only, no descriptors)
+
+If your DMA is just *source address + length* registers with a
+transfer-complete interrupt, walk the segments in the ISR: program the
+address and length registers from `framebuffer.bcm_segment(i)`, re-arm the
+transfer, and re-issue the same segment until its `reps` count is exhausted:
+
+```rust
+use hub75_framebuffer::FrameBuffer;
+
+// One tick of the refresh loop, called from the DMA transfer-complete ISR.
+fn reload_dma<FB: FrameBuffer>(fb: &FB, seg: &mut usize, rep: &mut usize) {
+    let s = fb.bcm_segment(*seg);
+    *rep += 1;
+    if *rep >= s.reps {
+        *rep = 0;
+        *seg = (*seg + 1) % fb.bcm_segment_count();
+    }
+    // program DMA: source = s.ptr, length = s.len,
+    // word size = FB::Word, then start the transfer
+}
+```
+
+The cadence is modest — the plane-major (`frame`) layouts raise only `PLANES`
+interrupts per panel refresh (8 at full color depth); the row-major (`row`)
+layouts raise one per segment of every row (`BCM_SEGMENT_COUNT` per refresh).
+
+If your DMA cannot interrupt at all — truly circular-only hardware — the
+deprecated threshold framebuffers (`plain`, `latched`) remain an option:
+their entire refresh is one contiguous buffer with all BCM timing baked into
+the memory image, at an exponential memory cost.
 
 ---
 
 ## Crate features
-
-### `esp-hal-dma` (required when using `esp-hal`)
-
-**Required** when using the `esp-hal` crate for ESP32 development. This
-feature switches the `ReadBuffer` trait implementation from `embedded-dma`
-to `esp-hal::dma`. If you're targeting ESP32 devices with `esp-hal`, you
-**must** enable this feature for DMA compatibility.
-
-```toml
-[dependencies]
-hub75-framebuffer = { version = "0.11.0", features = ["esp-hal-dma"] }
-```
 
 ### `esp32-ordering` (required for original ESP32 only)
 
@@ -227,6 +296,21 @@ hub75-framebuffer = { version = "0.11.0", features = ["inter-row-blank-8"] }
 These are independent of the `lead-blank-*` / `trail-blank-*` features and can
 be combined with them.
 
+### `invert-oe`
+
+Invert the polarity of the `OE` (output-enable) signal in the generated
+stream.  Useful when the panel or driver hardware (level shifters, glue logic)
+inverts `OE`, so the framebuffer data matches what the panel actually receives.
+
+### `tail-closes-latch` (plain framebuffers only)
+
+Append a single extra "tail" word at the end of the DMA data that drives `LAT`
+LOW (de-asserted) on the final clock edge.  Without it, the last word of each
+row leaves `LAT` asserted after the transfer completes; free-running DMA loops
+or peripherals that keep clocking can then re-latch stale data or glitch.
+Costs one extra 16-bit word per DMA chunk (one per bit-plane for
+`bitplane::plain`).
+
 ### `defmt`
 
 Implement the `defmt::Format` trait so framebuffer types can be logged with
@@ -242,7 +326,7 @@ Enable features in your `Cargo.toml`:
 ```toml
 [dependencies]
 hub75-framebuffer = { version = "0.11.0", 
-                      features = ["esp-hal-dma", "esp32-ordering"] }
+                      features = ["esp32-ordering", "skip-black-pixels"] }
 ```
 
 ---

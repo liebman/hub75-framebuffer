@@ -1,5 +1,10 @@
 //! DMA-friendly framebuffer implementation for HUB75 LED panels.
 //!
+//! **Deprecated:** this threshold-frame layout is kept for legacy drivers
+//! whose DMA can stream a single circular buffer but cannot raise interrupts.
+//! New designs should use [`bitplane::plain`](crate::bitplane::plain), which
+//! scales linearly with color depth instead of exponentially.
+//!
 //! This module provides a framebuffer implementation with memory
 //! layout optimized for efficient transfer to HUB75 LED panels. The data is
 //! structured for direct signal mapping, making it ideal for DMA transfers but
@@ -132,8 +137,8 @@
 use core::convert::Infallible;
 
 use crate::{
-    map_row_index, slot_addresses, BcmSegment, FrameBuffer, FrameBufferOperations,
-    MutableFrameBuffer, BCM_SEGMENT_SHAPES_CAPACITY,
+    map_row_index, slot_addresses, BcmLenReps, FrameBuffer, FrameBufferOperations,
+    MutableFrameBuffer, BCM_SEQUENCE_CAPACITY,
 };
 use bitfield::bitfield;
 use embedded_dma::ReadBuffer;
@@ -527,7 +532,7 @@ impl<
     /// Returns the number of BCM chunks in this framebuffer (always 1 for
     /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_count() -> usize {
         1
     }
@@ -536,7 +541,7 @@ impl<
     /// this equals the total DMA buffer size including the tail word, since BCM
     /// weighting is baked in).
     #[must_use]
-    #[deprecated(since = "0.11.0", note = "use BCM_SEGMENT_SHAPES instead")]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>()
     }
@@ -844,24 +849,22 @@ impl<
 {
     type Word = u16;
 
-    const BCM_SEGMENT_SHAPES: [(usize, usize); BCM_SEGMENT_SHAPES_CAPACITY] = {
-        let mut shapes = [(0usize, 0usize); BCM_SEGMENT_SHAPES_CAPACITY];
-        shapes[0] = (
-            core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>(),
-            1,
-        );
-        shapes
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = {
+        let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
+        seq[0] = BcmLenReps {
+            len: core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>(),
+            reps: 1,
+        };
+        seq
     };
 
     const BCM_SEQUENCE_LEN: usize = 1;
 
     const BCM_SEQUENCE_COUNT: usize = 1;
 
-    fn bcm_segment(&self, index: usize) -> BcmSegment {
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
         assert!(index == 0, "threshold DmaFrameBuffer has only 1 segment");
-        let ptr = (&raw const self.data).cast::<u8>();
-        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
-        BcmSegment { ptr, len, reps: 1 }
+        (&raw const self.data).cast::<u8>()
     }
 }
 
@@ -2129,7 +2132,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "only 1 segment")]
+    #[should_panic(expected = "out of range")]
     fn bcm_segment_panics_for_invalid_index() {
         use crate::FrameBuffer;
         let fb = TestFrameBuffer::new();
@@ -2137,7 +2140,7 @@ mod tests {
     }
 
     #[test]
-    fn bcm_segment_shapes_match_runtime_segments() {
+    fn bcm_sequence_matches_runtime_segments() {
         use crate::FrameBuffer;
         let fb = TestFrameBuffer::new();
         assert_eq!(
@@ -2146,16 +2149,16 @@ mod tests {
         );
         assert_eq!(fb.bcm_segment_count(), TestFrameBuffer::BCM_SEGMENT_COUNT);
         for i in 0..TestFrameBuffer::BCM_SEGMENT_COUNT {
-            let (len, reps) =
-                TestFrameBuffer::BCM_SEGMENT_SHAPES[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
+            let entry =
+                TestFrameBuffer::BCM_SEQUENCE[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
-            assert_eq!((seg.len, seg.reps), (len, reps), "segment {i} shape");
+            assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for &(len, reps) in
-            &TestFrameBuffer::BCM_SEGMENT_SHAPES[TestFrameBuffer::BCM_SEQUENCE_LEN..]
+        for entry in
+            &TestFrameBuffer::BCM_SEQUENCE[TestFrameBuffer::BCM_SEQUENCE_LEN..]
         {
-            assert_eq!((len, reps), (0, 0), "padding must be zero");
+            assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
 }
