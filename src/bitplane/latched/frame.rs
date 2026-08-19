@@ -306,8 +306,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u8;
 
-    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] =
-        bcm_sequence::<NROWS, COLS, PLANES>();
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = bcm_sequence::<NROWS, COLS, PLANES>();
 
     const BCM_SEQUENCE_LEN: usize = PLANES;
 

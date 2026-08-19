@@ -705,6 +705,7 @@ pub trait FrameBuffer {
 ///
 /// Useful for sizing DMA descriptor tables when the hardware uses one
 /// descriptor per repetition (e.g. esp32 DMA and stm32 GPDMA linked-list mode).
+#[must_use]
 pub const fn bcm_rep_count<FB: FrameBuffer>() -> usize {
     let mut total = 0;
     let mut seq = 0;

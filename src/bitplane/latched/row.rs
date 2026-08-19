@@ -185,12 +185,21 @@ const fn bcm_sequence<const COLS: usize, const PLANES: usize>(
     while within < seq_len {
         let entry = if within == 0 {
             let (covered, reps) = plane_suffix(0, PLANES);
-            BcmLenReps { len: plane_bytes * covered, reps }
+            BcmLenReps {
+                len: plane_bytes * covered,
+                reps,
+            }
         } else if HAS_GAP && within == 1 {
-            BcmLenReps { len: GAP_BYTES, reps: 1 }
+            BcmLenReps {
+                len: GAP_BYTES,
+                reps: 1,
+            }
         } else {
             let (covered, reps) = plane_suffix(within - gap, PLANES);
-            BcmLenReps { len: plane_bytes * covered, reps }
+            BcmLenReps {
+                len: plane_bytes * covered,
+                reps,
+            }
         };
         seq[within] = entry;
         within += 1;
@@ -505,8 +514,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u8;
 
-    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] =
-        bcm_sequence::<COLS, PLANES>();
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = bcm_sequence::<COLS, PLANES>();
 
     const BCM_SEQUENCE_LEN: usize = PLANES + HAS_GAP as usize;
 

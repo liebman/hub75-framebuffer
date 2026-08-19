@@ -2282,15 +2282,12 @@ mod tests {
         );
         assert_eq!(fb.bcm_segment_count(), TestFrameBuffer::BCM_SEGMENT_COUNT);
         for i in 0..TestFrameBuffer::BCM_SEGMENT_COUNT {
-            let entry =
-                TestFrameBuffer::BCM_SEQUENCE[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
+            let entry = TestFrameBuffer::BCM_SEQUENCE[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
             let seg = fb.bcm_segment(i);
             assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
             assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
         }
-        for entry in
-            &TestFrameBuffer::BCM_SEQUENCE[TestFrameBuffer::BCM_SEQUENCE_LEN..]
-        {
+        for entry in &TestFrameBuffer::BCM_SEQUENCE[TestFrameBuffer::BCM_SEQUENCE_LEN..] {
             assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
