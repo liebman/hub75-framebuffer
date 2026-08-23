@@ -779,7 +779,7 @@ mod tests {
     #[test]
     fn first_plane_has_lead_blank_only() {
         let fb = TestBuffer::new();
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
 
         for row in &fb.rows {
             let plane = &row.pixels[0];
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn last_plane_blanks_only_at_latch() {
         let fb = TestBuffer::new();
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
         let last = TEST_PLANES - 1;
 
         for row in &fb.rows {
@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn middle_planes_have_oe_active_except_latch() {
         let fb = TestBuffer::new();
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
 
         // Middle planes are 2..PLANES-2 (plane 1 has trail blank, last has lead blank)
         for row in &fb.rows {
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn plane_1_has_trail_blank_only() {
         let fb = TestBuffer::new();
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
 
         for row in &fb.rows {
             let plane = &row.pixels[1];
@@ -924,7 +924,7 @@ mod tests {
     fn single_plane_buffer_has_both_blanks_with_prev_addr() {
         type OnePlane = DmaFrameBuffer<16, TEST_COLS, 1>;
         let fb = OnePlane::new();
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
 
         for slot in 0..16 {
             let (prev_addr, _) = slot_addresses::<16>(slot);

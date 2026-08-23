@@ -71,14 +71,14 @@ pub use frame::DmaFrameBuffer;
 
 pub(crate) use crate::{INTER_ROW_BLANK, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
 
-#[cfg(not(feature = "invert-oe"))]
+#[cfg(feature = "invert-oe")]
 pub(crate) const OE_ACTIVE: u16 = 0b1_0000_0000;
-#[cfg(not(feature = "invert-oe"))]
+#[cfg(feature = "invert-oe")]
 pub(crate) const OE_BLANK: u16 = 0;
 
-#[cfg(feature = "invert-oe")]
+#[cfg(not(feature = "invert-oe"))]
 pub(crate) const OE_ACTIVE: u16 = 0;
-#[cfg(feature = "invert-oe")]
+#[cfg(not(feature = "invert-oe"))]
 pub(crate) const OE_BLANK: u16 = 0b1_0000_0000;
 
 // ---------------------------------------------------------------------------

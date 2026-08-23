@@ -628,7 +628,7 @@ mod tests {
         let mut row = Row::<TEST_COLS>::new();
         row.format(4);
 
-        let oe_active = !cfg!(feature = "invert-oe");
+        let oe_active = cfg!(feature = "invert-oe");
 
         let idx_active = map_index(TRAIL_BLANK_DELAY);
         assert_eq!(row.data[idx_active].output_enable(), oe_active);
@@ -687,11 +687,8 @@ mod tests {
     #[test]
     fn entry_new_oe_matches_feature() {
         let entry = Entry::new();
-        if cfg!(feature = "invert-oe") {
-            assert!(entry.output_enable());
-        } else {
-            assert!(!entry.output_enable());
-        }
+        // `Entry::new()` starts blanked, so its OE bit reflects OE_BLANK.
+        assert_eq!(entry.output_enable(), !cfg!(feature = "invert-oe"));
     }
 
     #[test]
@@ -699,19 +696,14 @@ mod tests {
         let mut row = Row::<TEST_COLS>::new();
         row.format(4);
 
+        let oe_active = cfg!(feature = "invert-oe");
         let active_idx = map_index(TRAIL_BLANK_DELAY);
         let blank_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
         let latch_idx = map_index(TEST_COLS - 1);
 
-        if cfg!(feature = "invert-oe") {
-            assert!(!row.data[active_idx].output_enable());
-            assert!(row.data[blank_idx].output_enable());
-            assert!(row.data[latch_idx].output_enable());
-        } else {
-            assert!(row.data[active_idx].output_enable());
-            assert!(!row.data[blank_idx].output_enable());
-            assert!(!row.data[latch_idx].output_enable());
-        }
+        assert_eq!(row.data[active_idx].output_enable(), oe_active);
+        assert_eq!(row.data[blank_idx].output_enable(), !oe_active);
+        assert_eq!(row.data[latch_idx].output_enable(), !oe_active);
     }
 
     static STATIC_FB: TestBuffer = TestBuffer::new();
