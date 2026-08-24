@@ -111,6 +111,8 @@ pub struct PlaneData<const NROWS: usize, const COLS: usize> {
     pub(crate) padding: Entry,
     #[cfg(feature = "tail-closes-latch")]
     pub(crate) tail: Entry,
+    #[cfg(all(not(feature = "esp32-ordering"), feature = "tail-closes-latch"))]
+    pub(crate) padding: Entry,
 }
 
 impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
@@ -121,6 +123,8 @@ impl<const NROWS: usize, const COLS: usize> PlaneData<NROWS, COLS> {
             padding: Entry::new(),
             #[cfg(feature = "tail-closes-latch")]
             tail: Entry::new(),
+            #[cfg(all(not(feature = "esp32-ordering"), feature = "tail-closes-latch"))]
+            padding: Entry::new(),
         }
     }
 }
@@ -221,9 +225,6 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             #[cfg(feature = "tail-closes-latch")]
             {
                 self.planes[p].tail.0 = 0x1f | OE_BLANK;
-            }
-            #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
-            {
                 self.planes[p].padding.0 = 0x1f | OE_BLANK;
             }
             p += 1;

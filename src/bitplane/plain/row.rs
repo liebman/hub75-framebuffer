@@ -142,17 +142,12 @@ const GAP_BYTES: usize = INTER_ROW_BLANK * core::mem::size_of::<Entry>();
 
 /// Byte size of the end-of-row trailer (optional padding + optional tail).
 const TRAILER_BYTES: usize = {
-    #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
-    let padding = core::mem::size_of::<Entry>();
-    #[cfg(not(all(feature = "esp32-ordering", feature = "tail-closes-latch")))]
-    let padding = 0;
-
     #[cfg(feature = "tail-closes-latch")]
-    let tail = core::mem::size_of::<Entry>();
+    let tail = core::mem::size_of::<Entry>() * 2;
     #[cfg(not(feature = "tail-closes-latch"))]
     let tail = 0;
 
-    padding + tail
+    tail
 };
 
 /// Whether this configuration has a non-empty inter-row gap segment.
@@ -291,6 +286,8 @@ pub struct RowData<const COLS: usize, const PLANES: usize> {
     pub(crate) padding: Entry,
     #[cfg(feature = "tail-closes-latch")]
     pub(crate) tail: Entry,
+    #[cfg(all(not(feature = "esp32-ordering"), feature = "tail-closes-latch"))]
+    pub(crate) padding: Entry,
 }
 
 impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
@@ -302,6 +299,8 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
             padding: Entry::new(),
             #[cfg(feature = "tail-closes-latch")]
             tail: Entry::new(),
+            #[cfg(all(not(feature = "esp32-ordering"), feature = "tail-closes-latch"))]
+            padding: Entry::new(),
         }
     }
 
@@ -357,9 +356,6 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
         #[cfg(feature = "tail-closes-latch")]
         {
             self.tail = Entry::from_raw(addr as u16 | OE_BLANK);
-        }
-        #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
-        {
             self.padding = Entry::from_raw(addr as u16 | OE_BLANK);
         }
     }
@@ -546,7 +542,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     }
 
     /// Returns a pointer and byte length for a row's end-of-row trailer (the
-    /// optional `esp32-ordering` padding and `tail-closes-latch` word).
+    /// optional padding and `tail-closes-latch` word).
     ///
     /// Returns length 0 when the `tail-closes-latch` feature is disabled.
     ///
