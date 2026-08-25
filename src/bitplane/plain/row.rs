@@ -12,17 +12,22 @@
 //! DmaFrameBuffer<NROWS, COLS, PLANES>
 //! ├── rows: [RowData<COLS, PLANES>; NROWS]
 //! │   └── RowData
-//! │       ├── pixels: [PixelPlane<COLS>; PLANES]   -- LSB-first
+//! │       ├── plane0: PixelPlane<COLS>             -- plane 0 (head, duplicate)
+//! │       │   └── data: [Entry; COLS]
+//! │       ├── gap: [Entry; INTER_ROW_BLANK]        -- inter-row blanking gap
+//! │       ├── planes: [PixelPlane<COLS>; PLANES]   -- planes 0..PLANES-1
 //! │       │   └── PixelPlane
 //! │       │       └── data: [Entry; COLS]
-//! │       ├── gap: [Entry; INTER_ROW_BLANK]        -- inter-row blanking gap
 //! │       ├── [padding: Entry]                     -- if esp32-ordering + tail-closes-latch
-//! │       └── [tail: Entry]                        -- if tail-closes-latch
+//! │       ├── [tail: Entry]                        -- if tail-closes-latch
+//! │       └── [padding: Entry]                     -- if not esp32-ordering + tail-closes-latch
 //! ```
 //!
-//! The gap is stored after the planes but is *streamed* between plane 0
-//! and plane 1: each BCM segment carries its own pointer, so streaming
-//! order is independent of storage order.
+//! `plane0` duplicates `planes[0]`: it sits before the gap so plane 0's gap
+//! segment can stream `plane0 + gap` (the gap's LATCH=0 entries close plane 0's
+//! latch before the DMA stops). Without a gap, plane 0's segment streams
+//! `planes[0..] + tail` from the array instead. Each later plane suffix ends on
+//! the tail word stored after the last plane.
 //!
 //! Planes are stored **LSB-first**: plane 0 carries the least-significant
 //! bit and is displayed once per row; plane `PLANES-1` carries the MSB and
@@ -40,12 +45,13 @@
 //!   (the address changes to the current row right after this plane and
 //!   the inter-row gap).
 //!   No trail blank is needed at its start: the previous row's planes 1+
-//!   (and the tail trailer) all carry the same `prev_addr`, so no address
+//!   (and the tail word) all carry the same `prev_addr`, so no address
 //!   change occurs there.
 //! - **Inter-row gap** (with an `inter-row-blank-*` feature): dead entries
-//!   holding `prev_addr` with OE blank, streamed between plane 0's latch
-//!   and the address change, giving slow row drivers extra blanked time
-//!   before the address lines move.
+//!   holding `prev_addr` with OE blank, streamed as the tail of plane 0's
+//!   segment (right after plane 0's latch, before the address change). They
+//!   give slow row drivers extra blanked time before the address lines move
+//!   and they close plane 0's latch.
 //! - **Plane 1** (first current-addr plane): trail blank at start
 //!   (the address changes from plane 0's `prev_addr` at its first pixel).
 //! - **Planes 2..PLANES-2** (middle): OE active on all entries except
@@ -58,15 +64,16 @@
 //!   at every row boundary. The gap is streamed after the single plane
 //!   and the address changes at the next row's plane 0 first pixel.
 //!
-//! When `tail-closes-latch` is enabled, a single tail word (LATCH=0,
-//! OE=BLANK) is appended at the end of each [`RowData`], after the last
-//! plane. This prevents peripherals that continue clocking after DMA
-//! completion from re-latching stale data.
+//! When `tail-closes-latch` is enabled, a tail word (LATCH=0, OE=BLANK) is
+//! appended to the end of each plane suffix segment so every DMA transfer ends
+//! with the latch de-asserted (plane 0's latch is closed by the gap instead,
+//! when one is present). This prevents peripherals that continue clocking after
+//! DMA completion (or between per-segment transfers) from re-latching stale
+//! data.
 //!
-//! The inter-row gap appears only once per scan row — streamed between
-//! plane 0 (shifted out before the address change) and plane 1 (shifted
-//! out at the address change) — rather than once per plane as in the
-//! plane-major layout.
+//! The inter-row gap appears only once per scan row — as the tail of
+//! plane 0's segment, before the address change — rather than once per
+//! plane as in the plane-major layout.
 //!
 //! # DMA Descriptor Pattern
 //!
@@ -85,26 +92,23 @@
 //! For each row the driver builds descriptors like (no inter-row gap):
 //!
 //! ```text
-//! planes 0..PLANES      × 1 rep        → rows[r].pixels[0..]  (plane 0: prev_addr)
-//! planes 1..PLANES      × 1 rep        → rows[r].pixels[1..]  (addr)
-//! planes 2..PLANES      × 2 reps       → rows[r].pixels[2..]
+//! plane 0..PLANES-1 + tail  × 1 rep        → rows[r].planes[0..] + tail   (plane 0: prev_addr)
+//! plane 1..PLANES-1 + tail  × 1 rep        → rows[r].planes[1..] + tail   (addr)
+//! plane 2..PLANES-1 + tail  × 2 reps       → rows[r].planes[2..] + tail
 //! …
-//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → rows[r].pixels[PLANES-1] (addr)
-//! trailer               × 1            → rows[r].padding + tail (if enabled)
+//! plane PLANES-1 + tail     × 2^(PLANES-2) → rows[r].planes[PLANES-1] + tail (addr)
 //! ```
 //!
-//! With an `inter-row-blank-*` feature enabled, plane 0 stands alone so the
-//! gap can be streamed between plane 0's latch and plane 1's address change,
-//! and plane 1's segment gets a second rep to preserve its weight:
+//! With an `inter-row-blank-*` feature enabled, plane 0 streams the gap right
+//! after its latch (the gap closes the latch) and plane 1's segment gets a
+//! second rep to preserve its weight:
 //!
 //! ```text
-//! plane 0 (LSB)         × 1 rep        → rows[r].pixels[0]    (prev_addr)
-//! inter-row gap         × 1            → rows[r].gap          (prev_addr, OE blank)
-//! planes 1..PLANES      × 2 reps       → rows[r].pixels[1..]  (addr)
-//! planes 2..PLANES      × 2 reps       → rows[r].pixels[2..]
+//! plane 0 + gap          × 1 rep        → rows[r].plane0 + gap  (prev_addr)
+//! planes 1..PLANES + tail × 2 reps      → rows[r].planes[1..] + tail (addr)
+//! planes 2..PLANES + tail × 2 reps      → rows[r].planes[2..] + tail
 //! …
-//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → rows[r].pixels[PLANES-1]
-//! trailer               × 1            → rows[r].padding + tail (if enabled)
+//! plane  PLANES-1 + tail × 2^(PLANES-2) → rows[r].planes[PLANES-1] + tail
 //! ```
 
 use core::convert::Infallible;
@@ -136,11 +140,12 @@ impl<const COLS: usize> PixelPlane<COLS> {
     }
 }
 
-/// Byte size of the inter-row blanking gap segment (streamed between
-/// plane 0 and plane 1).
+/// Byte size of the inter-row blanking gap (streamed as the tail of
+/// plane 0's segment, closing its latch before the address change).
 const GAP_BYTES: usize = INTER_ROW_BLANK * core::mem::size_of::<Entry>();
 
-/// Byte size of the end-of-row trailer (optional padding + optional tail).
+/// Byte size of the tail word appended to each plane suffix segment
+/// (optional padding + optional tail).
 const TRAILER_BYTES: usize = {
     #[cfg(feature = "tail-closes-latch")]
     let tail = core::mem::size_of::<Entry>() * 2;
@@ -150,31 +155,23 @@ const TRAILER_BYTES: usize = {
     tail
 };
 
-/// Whether this configuration has a non-empty inter-row gap segment.
-#[allow(clippy::absurd_extreme_comparisons)]
-const HAS_GAP: bool = GAP_BYTES > 0;
-
-/// Whether this configuration has a non-empty end-of-row trailer segment.
-#[allow(clippy::absurd_extreme_comparisons)]
-const HAS_TRAILER: bool = TRAILER_BYTES > 0;
-
 /// Coalesced BCM suffix for plane `plane_idx`: returns
 /// `(covered_planes, reps)` — how many planes the segment spans (starting at
 /// `plane_idx`) and how many times that suffix is streamed. See the
 /// module-level "DMA Descriptor Pattern" section for the full scheme.
 ///
-/// With an inter-row gap, plane 0 stands alone (the gap segment is streamed
-/// between plane 0 and plane 1), so plane 1's segment needs 2 reps to
+/// With an inter-row gap, plane 0 stands alone (its segment streams just
+/// plane 0 plus the inter-row gap), so plane 1's segment needs 2 reps to
 /// preserve its weight.
 const fn plane_suffix(plane_idx: usize, planes: usize) -> (usize, usize) {
-    let covered = if HAS_GAP && plane_idx == 0 {
+    let covered = if cfg!(feature = "inter-row-blank") && plane_idx == 0 {
         1
     } else {
         planes - plane_idx
     };
     let reps = if plane_idx == 0 {
         1
-    } else if HAS_GAP && plane_idx == 1 {
+    } else if cfg!(feature = "inter-row-blank") && plane_idx == 1 {
         2
     } else {
         1 << (plane_idx - 1)
@@ -182,42 +179,34 @@ const fn plane_suffix(plane_idx: usize, planes: usize) -> (usize, usize) {
     (covered, reps)
 }
 
-/// BCM sequence for one row: one entry per plane (each streaming the
-/// contiguous plane suffix `plane..PLANES`), plus the inter-row gap and
-/// end-of-row trailer segments when enabled. Entries past the sequence are
-/// zero padding.
+/// BCM sequence for one row: one entry per plane. Plane 0 streams its own
+/// plane (plus the inter-row gap when enabled — the gap closes its latch);
+/// each later plane streams the contiguous suffix `plane..PLANES` followed by
+/// the tail word when enabled. Entries past the sequence are zero padding.
 #[allow(clippy::absurd_extreme_comparisons)]
 const fn bcm_sequence<const COLS: usize, const PLANES: usize>(
 ) -> [BcmLenReps; BCM_SEQUENCE_CAPACITY] {
-    let gap = HAS_GAP as usize;
-    let trailer = HAS_TRAILER as usize;
-    let seq_len = PLANES + gap + trailer;
+    let seq_len = PLANES;
     assert!(seq_len <= BCM_SEQUENCE_CAPACITY);
     let plane_bytes = COLS * core::mem::size_of::<Entry>();
     let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
     let mut within = 0usize;
     while within < seq_len {
         let entry = if within == 0 {
-            let (covered, reps) = plane_suffix(0, PLANES);
-            BcmLenReps {
-                len: plane_bytes * covered,
-                reps,
-            }
-        } else if HAS_GAP && within == 1 {
-            BcmLenReps {
-                len: GAP_BYTES,
-                reps: 1,
-            }
-        } else if within < PLANES + gap {
-            let (covered, reps) = plane_suffix(within - gap, PLANES);
-            BcmLenReps {
-                len: plane_bytes * covered,
-                reps,
-            }
+            // Plane 0 (LSB, 1 rep): with an inter-row gap it streams the gap
+            // right after its latch (the gap closes the latch); without a gap
+            // it covers every plane and ends on the tail word.
+            let len = if cfg!(feature = "inter-row-blank") {
+                plane_bytes + GAP_BYTES
+            } else {
+                plane_bytes * PLANES + TRAILER_BYTES
+            };
+            BcmLenReps { len, reps: 1 }
         } else {
+            let (covered, reps) = plane_suffix(within, PLANES);
             BcmLenReps {
-                len: TRAILER_BYTES,
-                reps: 1,
+                len: plane_bytes * covered + TRAILER_BYTES,
+                reps,
             }
         };
         seq[within] = entry;
@@ -267,8 +256,8 @@ const fn make_row_plane_template<const COLS: usize>(
 /// One scan row's complete data: pixel entries for all bit-planes (LSB-first),
 /// the inter-row blanking gap, and an optional tail word.
 ///
-/// The gap is stored after the planes but is *streamed* between plane 0 and
-/// plane 1 (see the module-level DMA descriptor pattern).
+/// The gap is stored between plane 0 and planes 1.. and is *streamed* as the
+/// tail of plane 0's segment (see the module-level DMA descriptor pattern).
 ///
 /// Blanking is applied only around the single address change (the
 /// plane0→plane1 boundary); see the module-level documentation:
@@ -280,8 +269,11 @@ const fn make_row_plane_template<const COLS: usize>(
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
 pub struct RowData<const COLS: usize, const PLANES: usize> {
-    pub(crate) pixels: [PixelPlane<COLS>; PLANES],
+    #[cfg(feature = "inter-row-blank")]
+    pub(crate) plane0: PixelPlane<COLS>,
+    #[cfg(feature = "inter-row-blank")]
     pub(crate) gap: [Entry; INTER_ROW_BLANK],
+    pub(crate) planes: [PixelPlane<COLS>; PLANES],
     #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
     pub(crate) padding: Entry,
     #[cfg(feature = "tail-closes-latch")]
@@ -293,8 +285,11 @@ pub struct RowData<const COLS: usize, const PLANES: usize> {
 impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
     const fn new() -> Self {
         Self {
-            pixels: [PixelPlane::new(); PLANES],
+            #[cfg(feature = "inter-row-blank")]
+            plane0: PixelPlane::new(),
+            #[cfg(feature = "inter-row-blank")]
             gap: [Entry::new(); INTER_ROW_BLANK],
+            planes: [PixelPlane::new(); PLANES],
             #[cfg(all(feature = "esp32-ordering", feature = "tail-closes-latch"))]
             padding: Entry::new(),
             #[cfg(feature = "tail-closes-latch")]
@@ -304,10 +299,31 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
         }
     }
 
+    /// Indexes the logical plane array (`0` → plane 0, `1..` → planes 1..).
+    #[cfg(test)]
+    #[inline]
+    const fn plane(&self, p: usize) -> &PixelPlane<COLS> {
+        &self.planes[p]
+    }
+
+    /// Mutable counterpart of the `plane` accessor.
+    #[inline]
+    const fn plane_mut(&mut self, p: usize) -> &mut PixelPlane<COLS> {
+        &mut self.planes[p]
+    }
+
+    /// Copies plane 0 into the dedicated head field that prefixes the
+    /// inter-row gap (the two must always agree).
+    #[cfg(feature = "inter-row-blank")]
+    #[inline]
+    const fn sync_plane0(&mut self) {
+        self.plane0 = self.planes[0];
+    }
+
     /// Format control signals for this row.
     ///
     /// - `prev_addr`: previous row address (used by plane 0 / LSB and the gap).
-    /// - `addr`: current row address (used by planes 1+ and trailer).
+    /// - `addr`: current row address (used by planes 1+ and the tail).
     const fn format(&mut self, prev_addr: u8, addr: u8) {
         let mut p = 0;
         while p < PLANES {
@@ -321,7 +337,7 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
                 let template = make_row_plane_template::<COLS>(prev_addr, PLANES == 1, true);
                 let mut c = 0;
                 while c < COLS {
-                    self.pixels[p].data[c] = template[c];
+                    self.plane_mut(p).data[c] = template[c];
                     c += 1;
                 }
             } else {
@@ -331,12 +347,19 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
                 let template = make_row_plane_template::<COLS>(addr, trail, false);
                 let mut c = 0;
                 while c < COLS {
-                    self.pixels[p].data[c] = template[c];
+                    self.plane_mut(p).data[c] = template[c];
                     c += 1;
                 }
             }
 
             p += 1;
+        }
+
+        // Plane 0 is duplicated into the gap-prefix head, so the gap segment
+        // streams `plane0 + gap`.
+        #[cfg(feature = "inter-row-blank")]
+        {
+            self.sync_plane0();
         }
 
         // The gap is streamed between plane 0 (shifted out with `prev_addr`)
@@ -345,12 +368,14 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
         // until after the gap. With `PLANES == 1` the gap is streamed after
         // the single plane and the address changes at the next row's plane 0
         // first pixel instead.
-        let gap_entry = Entry::from_raw(prev_addr as u16 | OE_BLANK);
-        let mut i = 0;
-        #[allow(clippy::absurd_extreme_comparisons)]
-        while i < INTER_ROW_BLANK {
-            self.gap[i] = gap_entry;
-            i += 1;
+        #[cfg(feature = "inter-row-blank")]
+        {
+            let gap_entry = Entry::from_raw(prev_addr as u16 | OE_BLANK);
+            let mut i = 0;
+            while i < INTER_ROW_BLANK {
+                self.gap[i] = gap_entry;
+                i += 1;
+            }
         }
 
         #[cfg(feature = "tail-closes-latch")]
@@ -423,7 +448,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         NROWS
     }
 
-    /// Byte size of the per-row overhead (inter-row gap + optional trailer).
+    /// Byte size of the per-row overhead (inter-row gap + optional tail).
     #[must_use]
     pub const fn bcm_row_bytes() -> usize {
         GAP_BYTES + TRAILER_BYTES
@@ -452,10 +477,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     pub fn erase(&mut self) {
         const MASK: u16 = !0b0111_1110_0000_0000; // clear bits 9-14
         for row in &mut self.rows {
-            for plane in &mut row.pixels {
-                for entry in &mut plane.data {
+            for p in 0..PLANES {
+                for entry in &mut row.plane_mut(p).data {
                     entry.mask_raw(MASK);
                 }
+            }
+            #[cfg(feature = "inter-row-blank")]
+            {
+                row.sync_plane0();
             }
         }
     }
@@ -488,18 +517,25 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         let green = color.g();
         let blue = color.b();
 
+        let col_idx = map_index(x);
         for plane_idx in 0..PLANES {
             let bit = (8 - PLANES + plane_idx) as u32;
             let bits = ((u8::from(((blue >> bit) & 1) != 0)) << 2)
                 | ((u8::from(((green >> bit) & 1) != 0)) << 1)
                 | u8::from(((red >> bit) & 1) != 0);
-            let col_idx = map_index(x);
-            let entry = &mut self.rows[row_idx].pixels[plane_idx].data[col_idx];
+            let entry = &mut self.rows[row_idx].plane_mut(plane_idx).data[col_idx];
             if is_top {
                 entry.set_color0_bits(bits);
             } else {
                 entry.set_color1_bits(bits);
             }
+        }
+        // Mirror just the touched column into the gap-prefix head (format and
+        // erase keep the two copies fully in sync, so only this one entry can
+        // have changed here).
+        #[cfg(feature = "inter-row-blank")]
+        {
+            self.rows[row_idx].plane0.data[col_idx] = self.rows[row_idx].planes[0].data[col_idx];
         }
     }
 
@@ -517,15 +553,15 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             plane_idx < PLANES,
             "plane_idx {plane_idx} out of range for {PLANES} planes"
         );
-        let ptr = (&raw const self.rows[row_idx].pixels[plane_idx]).cast::<u8>();
+        let ptr = (&raw const self.rows[row_idx].planes[plane_idx]).cast::<u8>();
         let len = COLS * core::mem::size_of::<Entry>();
         (ptr, len)
     }
 
     /// Returns a pointer and byte length for a row's inter-row blanking gap.
     ///
-    /// The gap is streamed between plane 0 (LSB) and plane 1 and holds the
-    /// previous row address with OE blank, deferring the address change
+    /// The gap is streamed as the tail of plane 0's segment (LSB) and holds
+    /// the previous row address with OE blank, deferring the address change
     /// until after the gap. Returns length 0 when no `inter-row-blank-*`
     /// feature is enabled.
     ///
@@ -537,7 +573,10 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             row_idx < NROWS,
             "row_idx {row_idx} out of range for {NROWS} rows"
         );
+        #[cfg(feature = "inter-row-blank")]
         let ptr = (&raw const self.rows[row_idx].gap).cast::<u8>();
+        #[cfg(not(feature = "inter-row-blank"))]
+        let ptr = (&raw const self.rows[row_idx].planes[0]).cast::<u8>();
         (ptr, GAP_BYTES)
     }
 
@@ -559,7 +598,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
         #[cfg(all(feature = "tail-closes-latch", not(feature = "esp32-ordering")))]
         let ptr = (&raw const self.rows[row_idx].tail).cast::<u8>();
         #[cfg(not(feature = "tail-closes-latch"))]
-        let ptr = (&raw const self.rows[row_idx].gap).cast::<u8>();
+        let ptr = (&raw const self.rows[row_idx].planes[0]).cast::<u8>();
         (ptr, TRAILER_BYTES)
     }
 }
@@ -602,36 +641,30 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 
     const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = bcm_sequence::<COLS, PLANES>();
 
-    const BCM_SEQUENCE_LEN: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
+    const BCM_SEQUENCE_LEN: usize = PLANES;
 
     const BCM_SEQUENCE_COUNT: usize = NROWS;
 
-    const BCM_SEGMENTS_PER_GROUP: usize = PLANES + HAS_GAP as usize + HAS_TRAILER as usize;
+    const BCM_SEGMENTS_PER_GROUP: usize = PLANES;
 
     fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
-        let gap = usize::from(HAS_GAP);
-        let trailer = usize::from(HAS_TRAILER);
-        let segments_per_row = PLANES + gap + trailer;
+        let segments_per_row = PLANES;
         assert!(
             index < NROWS * segments_per_row,
             "segment index {index} out of range"
         );
         let row_idx = index / segments_per_row;
-        let within_row = index % segments_per_row;
-        if within_row == 0 {
-            let (ptr, _) = self.pixel_row_ptr_len(row_idx, 0);
-            ptr
-        } else if HAS_GAP && within_row == 1 {
-            let (ptr, _) = self.gap_ptr_len(row_idx);
-            ptr
-        } else if within_row < PLANES + gap {
-            let plane_idx = within_row - gap;
-            let (ptr, _) = self.pixel_row_ptr_len(row_idx, plane_idx);
-            ptr
-        } else {
-            let (ptr, _) = self.trailer_ptr_len(row_idx);
-            ptr
+        let plane_idx = index % segments_per_row;
+        #[cfg(feature = "inter-row-blank")]
+        {
+            if plane_idx == 0 {
+                // Plane 0's gap segment streams the dedicated head (`plane0`)
+                // followed by the gap.
+                return (&raw const self.rows[row_idx].plane0).cast::<u8>();
+            }
         }
+        let (ptr, _) = self.pixel_row_ptr_len(row_idx, plane_idx);
+        ptr
     }
 }
 
@@ -709,7 +742,7 @@ mod tests {
 
             // Plane 0 (LSB): prev_addr
             for col in 0..TEST_COLS {
-                let entry = fb.rows[slot].pixels[0].data[col];
+                let entry = fb.rows[slot].plane(0).data[col];
                 assert_eq!(
                     entry.addr(),
                     prev_addr,
@@ -720,7 +753,7 @@ mod tests {
             // Planes 1+: current addr
             for plane_idx in 1..TEST_PLANES {
                 for col in 0..TEST_COLS {
-                    let entry = fb.rows[slot].pixels[plane_idx].data[col];
+                    let entry = fb.rows[slot].plane(plane_idx).data[col];
                     assert_eq!(
                         entry.addr(),
                         u16::from(addr),
@@ -742,7 +775,8 @@ mod tests {
             // at its start, so no trail blank)
             let expected = make_row_plane_template::<TEST_COLS>(prev_addr, false, true);
             assert_eq!(
-                fb.rows[slot].pixels[0].data, expected,
+                fb.rows[slot].plane(0).data,
+                expected,
                 "slot {slot} plane 0 doesn't match template"
             );
 
@@ -750,7 +784,8 @@ mod tests {
             for p in 1..TEST_PLANES {
                 let expected = make_row_plane_template::<TEST_COLS>(addr, p == 1, false);
                 assert_eq!(
-                    fb.rows[slot].pixels[p].data, expected,
+                    fb.rows[slot].plane(p).data,
+                    expected,
                     "slot {slot} plane {p} doesn't match template"
                 );
             }
@@ -762,7 +797,8 @@ mod tests {
         let fb = TestBuffer::new();
 
         for row in &fb.rows {
-            for plane in &row.pixels {
+            for p in 0..TEST_PLANES {
+                let plane = row.plane(p);
                 let last_idx = map_index(TEST_COLS - 1);
                 assert!(
                     plane.data[last_idx].latch(),
@@ -778,7 +814,7 @@ mod tests {
         let oe_active = cfg!(feature = "invert-oe");
 
         for row in &fb.rows {
-            let plane = &row.pixels[0];
+            let plane = row.plane(0);
 
             // No trail blank: the previous row's planes and trailer all carry
             // the same prev_addr, so no address change occurs at plane 0's start.
@@ -819,7 +855,7 @@ mod tests {
         let last = TEST_PLANES - 1;
 
         for row in &fb.rows {
-            let plane = &row.pixels[last];
+            let plane = row.plane(last);
 
             let first_idx = map_index(0);
             assert_eq!(
@@ -857,7 +893,7 @@ mod tests {
         for row in &fb.rows {
             for plane_idx in 2..TEST_PLANES - 1 {
                 for col in 0..TEST_COLS {
-                    let entry = row.pixels[plane_idx].data[col];
+                    let entry = row.plane(plane_idx).data[col];
                     if col == map_index(TEST_COLS - 1) {
                         assert_eq!(
                             entry.output_enable(),
@@ -882,7 +918,7 @@ mod tests {
         let oe_active = cfg!(feature = "invert-oe");
 
         for row in &fb.rows {
-            let plane = &row.pixels[1];
+            let plane = row.plane(1);
 
             if TRAIL_BLANK_DELAY > 0 {
                 let trail_idx = map_index(0);
@@ -925,7 +961,7 @@ mod tests {
         for slot in 0..16 {
             let (prev_addr, _) = slot_addresses::<16>(slot);
             let prev_addr = u16::from(prev_addr);
-            let plane = &fb.rows[slot].pixels[0];
+            let plane = fb.rows[slot].plane(0);
 
             // Single plane uses prev_addr
             assert_eq!(
@@ -969,7 +1005,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[map_row_index::<16>(3)].pixels[plane_idx].data[map_index(2)];
+            let entry = fb.rows[map_row_index::<16>(3)].plane(plane_idx).data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
@@ -984,7 +1020,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[map_row_index::<16>(4)].pixels[plane_idx].data[map_index(4)];
+            let entry = fb.rows[map_row_index::<16>(4)].plane(plane_idx).data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
@@ -999,29 +1035,29 @@ mod tests {
         // Slot 0 is streamed first and renders the last panel row: plane 0
         // carries prev_addr 0 (row 0 is displayed while it is shifted) and
         // planes 1+ carry the slot's own address 15.
-        assert_eq!(fb.rows[0].pixels[0].data[map_index(0)].addr(), 0);
-        assert_eq!(fb.rows[0].pixels[1].data[map_index(0)].addr(), 15);
+        assert_eq!(fb.rows[0].plane(0).data[map_index(0)].addr(), 0);
+        assert_eq!(fb.rows[0].plane(1).data[map_index(0)].addr(), 15);
         // The final slot renders panel row 0: prev_addr 1, own address 0.
-        assert_eq!(fb.rows[15].pixels[0].data[map_index(0)].addr(), 1);
-        assert_eq!(fb.rows[15].pixels[1].data[map_index(0)].addr(), 0);
+        assert_eq!(fb.rows[15].plane(0).data[map_index(0)].addr(), 1);
+        assert_eq!(fb.rows[15].plane(1).data[map_index(0)].addr(), 0);
 
         // Logical row 0 maps to the last memory slot.
         fb.set_pixel(Point::new(2, 0), Color::RED);
         let col2 = map_index(2);
-        assert!(fb.rows[15].pixels[TEST_PLANES - 1].data[col2].red1());
-        assert!(!fb.rows[0].pixels[TEST_PLANES - 1].data[col2].red1());
+        assert!(fb.rows[15].plane(TEST_PLANES - 1).data[col2].red1());
+        assert!(!fb.rows[0].plane(TEST_PLANES - 1).data[col2].red1());
     }
 
     #[test]
     fn erase_clears_only_color_bits() {
         let mut fb = TestBuffer::new();
-        let oe_before =
-            fb.rows[map_row_index::<16>(0)].pixels[0].data[map_index(1)].output_enable();
+        let oe_before = fb.rows[map_row_index::<16>(0)].plane(0).data[map_index(1)].output_enable();
         fb.set_pixel(Point::new(0, 0), Color::WHITE);
         fb.erase();
 
         for row in &fb.rows {
-            for plane in &row.pixels {
+            for p in 0..TEST_PLANES {
+                let plane = row.plane(p);
                 for entry in &plane.data {
                     assert!(!entry.red1());
                     assert!(!entry.grn1());
@@ -1034,7 +1070,7 @@ mod tests {
         }
 
         assert_eq!(
-            fb.rows[map_row_index::<16>(0)].pixels[0].data[map_index(1)].output_enable(),
+            fb.rows[map_row_index::<16>(0)].plane(0).data[map_index(1)].output_enable(),
             oe_before
         );
     }
@@ -1049,8 +1085,8 @@ mod tests {
         for row_idx in 0..16 {
             for plane_idx in 0..TEST_PLANES {
                 for col in 0..TEST_COLS {
-                    let entry = fb.rows[row_idx].pixels[plane_idx].data[col];
-                    let fresh = fb_fresh.rows[row_idx].pixels[plane_idx].data[col];
+                    let entry = fb.rows[row_idx].plane(plane_idx).data[col];
+                    let fresh = fb_fresh.rows[row_idx].plane(plane_idx).data[col];
                     assert_eq!(
                         entry.output_enable(),
                         fresh.output_enable(),
@@ -1071,6 +1107,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "inter-row-blank")]
     #[test]
     fn erase_preserves_gap() {
         let fb_fresh = TestBuffer::new();
@@ -1086,6 +1123,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "inter-row-blank")]
     #[test]
     fn gap_entries_hold_prev_addr_and_oe_blank() {
         let fb = TestBuffer::new();
@@ -1129,7 +1167,7 @@ mod tests {
 
         for plane_idx in 0..TEST_PLANES {
             let bit = 8 - TEST_PLANES + plane_idx;
-            let entry = fb.rows[map_row_index::<16>(1)].pixels[plane_idx].data[map_index(1)];
+            let entry = fb.rows[map_row_index::<16>(1)].plane(plane_idx).data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
             assert!(!entry.blu1());
@@ -1157,17 +1195,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert!(fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -1180,17 +1218,17 @@ mod tests {
 
         // Verify it's red in the first plane
         let mapped_col_10 = map_index(10);
-        assert!(fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].blu1());
+        assert!(fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].blu1());
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].red1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].grn1());
-        assert!(!fb.rows[map_row_index::<16>(5)].pixels[0].data[mapped_col_10].blu1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].red1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].grn1());
+        assert!(!fb.rows[map_row_index::<16>(5)].plane(0).data[mapped_col_10].blu1());
     }
 
     #[test]
@@ -1210,7 +1248,7 @@ mod tests {
         let fb = TestBuffer::new();
         let (ptr, len) = fb.pixel_row_ptr_len(0, 0);
         assert_eq!(len, TEST_COLS * core::mem::size_of::<Entry>());
-        assert_eq!(ptr, (&raw const fb.rows[0].pixels[0]).cast::<u8>());
+        assert_eq!(ptr, (&raw const fb.rows[0].planes[0]).cast::<u8>());
     }
 
     #[test]
@@ -1218,7 +1256,10 @@ mod tests {
         let fb = TestBuffer::new();
         let (ptr, len) = fb.gap_ptr_len(0);
         assert_eq!(len, GAP_BYTES);
+        #[cfg(feature = "inter-row-blank")]
         assert_eq!(ptr, (&raw const fb.rows[0].gap).cast::<u8>());
+        #[cfg(not(feature = "inter-row-blank"))]
+        assert_eq!(ptr, (&raw const fb.rows[0].planes[0]).cast::<u8>());
     }
 
     #[test]
@@ -1231,7 +1272,7 @@ mod tests {
         #[cfg(all(feature = "tail-closes-latch", not(feature = "esp32-ordering")))]
         assert_eq!(ptr, (&raw const fb.rows[0].tail).cast::<u8>());
         #[cfg(not(feature = "tail-closes-latch"))]
-        assert_eq!(ptr, (&raw const fb.rows[0].gap).cast::<u8>());
+        assert_eq!(ptr, (&raw const fb.rows[0].planes[0]).cast::<u8>());
     }
 
     #[test]
@@ -1284,13 +1325,20 @@ mod tests {
         let runtime_fb = TestBuffer::new();
 
         for (ri, row) in STATIC_FB.rows.iter().enumerate() {
+            #[cfg(feature = "inter-row-blank")]
+            {
+                assert_eq!(
+                    row.plane0, runtime_fb.rows[ri].plane0,
+                    "static vs runtime plane0 mismatch at row {ri}"
+                );
+                assert_eq!(
+                    row.gap, runtime_fb.rows[ri].gap,
+                    "static vs runtime gap mismatch at row {ri}"
+                );
+            }
             assert_eq!(
-                row.pixels, runtime_fb.rows[ri].pixels,
-                "static vs runtime pixel mismatch at row {ri}"
-            );
-            assert_eq!(
-                row.gap, runtime_fb.rows[ri].gap,
-                "static vs runtime gap mismatch at row {ri}"
+                row.planes, runtime_fb.rows[ri].planes,
+                "static vs runtime planes mismatch at row {ri}"
             );
         }
     }
@@ -1302,13 +1350,20 @@ mod tests {
         fb.format();
 
         for (ri, row) in fb.rows.iter().enumerate() {
+            #[cfg(feature = "inter-row-blank")]
+            {
+                assert_eq!(
+                    row.plane0, STATIC_FB.rows[ri].plane0,
+                    "re-formatted vs static plane0 mismatch at row {ri}"
+                );
+                assert_eq!(
+                    row.gap, STATIC_FB.rows[ri].gap,
+                    "re-formatted vs static gap mismatch at row {ri}"
+                );
+            }
             assert_eq!(
-                row.pixels, STATIC_FB.rows[ri].pixels,
-                "re-formatted vs static pixel mismatch at row {ri}"
-            );
-            assert_eq!(
-                row.gap, STATIC_FB.rows[ri].gap,
-                "re-formatted vs static gap mismatch at row {ri}"
+                row.planes, STATIC_FB.rows[ri].planes,
+                "re-formatted vs static planes mismatch at row {ri}"
             );
         }
     }
@@ -1319,11 +1374,12 @@ mod tests {
         FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
 
         // Plane 7 (MSB) carries bit 7; GREEN = 0xFF so bit 7 is set
-        assert!(fb.rows[map_row_index::<16>(5)].pixels[TEST_PLANES - 1].data[map_index(3)].grn1());
+        assert!(fb.rows[map_row_index::<16>(5)].plane(TEST_PLANES - 1).data[map_index(3)].grn1());
 
         FrameBufferOperations::erase(&mut fb);
         for row in &fb.rows {
-            for plane in &row.pixels {
+            for p in 0..TEST_PLANES {
+                let plane = row.plane(p);
                 for entry in &plane.data {
                     assert!(!entry.red1());
                     assert!(!entry.grn1());
@@ -1338,7 +1394,8 @@ mod tests {
 
     #[test]
     fn row_data_size_matches_expected_layout() {
-        let expected_pixels = core::mem::size_of::<PixelPlane<TEST_COLS>>() * TEST_PLANES;
+        let expected_pixels = core::mem::size_of::<PixelPlane<TEST_COLS>>()
+            * (TEST_PLANES + usize::from(cfg!(feature = "inter-row-blank")));
         let expected_overhead = GAP_BYTES + TRAILER_BYTES;
         assert_eq!(
             core::mem::size_of::<RowData<TEST_COLS, 8>>(),
@@ -1347,21 +1404,17 @@ mod tests {
     }
 
     #[test]
-    fn bcm_segment_count_equals_rows_times_planes_plus_gap_and_trailer() {
+    fn bcm_segment_count_equals_rows_times_planes() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        assert_eq!(fb.bcm_segment_count(), 16 * (TEST_PLANES + gap + trailer));
+        assert_eq!(fb.bcm_segment_count(), 16 * TEST_PLANES);
     }
 
     #[test]
-    fn bcm_segments_per_group_equals_planes_plus_gap_and_trailer() {
+    fn bcm_segments_per_group_equals_planes() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        assert_eq!(fb.bcm_segments_per_group(), TEST_PLANES + gap + trailer);
+        assert_eq!(fb.bcm_segments_per_group(), TEST_PLANES);
         assert_eq!(
             fb.bcm_segment_count() % fb.bcm_segments_per_group(),
             0,
@@ -1370,41 +1423,45 @@ mod tests {
     }
 
     #[test]
-    fn bcm_segments_interleave_pixel_gap_and_trailer() {
+    fn bcm_segments_interleave_pixel_and_gap() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        let segments_per_row = TEST_PLANES + gap + trailer;
+        let segments_per_row = TEST_PLANES;
 
         for row in 0..16usize {
-            // Plane 0 (LSB) comes first; without a gap it covers all planes.
+            // Plane 0 (LSB) comes first. With a gap it streams plane 0 plus
+            // the gap (whose LATCH=0 entries close plane 0's latch); without
+            // a gap it covers every plane and ends on the tail word.
             let seg = fb.bcm_segment(row * segments_per_row);
-            let (ptr, plane_len) = fb.pixel_row_ptr_len(row, 0);
-            let covered0 = if HAS_GAP { 1 } else { TEST_PLANES };
-            assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane 0");
-            assert_eq!(
-                seg.len,
-                plane_len * covered0,
-                "wrong len at row {row} plane 0"
-            );
+            let plane_len = TEST_COLS * core::mem::size_of::<Entry>();
+            let len0 = if cfg!(feature = "inter-row-blank") {
+                plane_len + GAP_BYTES
+            } else {
+                plane_len * TEST_PLANES + TRAILER_BYTES
+            };
+            #[cfg(feature = "inter-row-blank")]
+            {
+                // With a gap, plane 0's segment streams the dedicated head
+                // (plane0) rather than the array copy.
+                assert_eq!(
+                    seg.ptr,
+                    (&raw const fb.rows[row].plane0).cast::<u8>(),
+                    "wrong ptr at row {row} plane 0"
+                );
+            }
+            #[cfg(not(feature = "inter-row-blank"))]
+            {
+                let (ptr, _) = fb.pixel_row_ptr_len(row, 0);
+                assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane 0");
+            }
+            assert_eq!(seg.len, len0, "wrong len at row {row} plane 0");
             assert_eq!(seg.reps, 1, "wrong reps at row {row} plane 0");
 
-            // The inter-row gap (if any) is streamed between plane 0 and 1.
-            if HAS_GAP {
-                let seg = fb.bcm_segment(row * segments_per_row + 1);
-                let (ptr, len) = fb.gap_ptr_len(row);
-                assert_eq!(seg.ptr, ptr, "wrong gap ptr at row {row}");
-                assert_eq!(seg.len, len, "wrong gap len at row {row}");
-                assert_eq!(seg.reps, 1, "gap reps must be 1 at row {row}");
-            }
-
-            // Planes 1.. follow the gap; each streams the remaining suffix.
+            // Planes 1.. each stream the remaining suffix plus the tail word.
             for plane in 1..TEST_PLANES {
-                let idx = row * segments_per_row + plane + gap;
-                let seg = fb.bcm_segment(idx);
+                let seg = fb.bcm_segment(row * segments_per_row + plane);
                 let (ptr, plane_len) = fb.pixel_row_ptr_len(row, plane);
-                let expected_reps = if HAS_GAP && plane == 1 {
+                let expected_reps = if cfg!(feature = "inter-row-blank") && plane == 1 {
                     2
                 } else {
                     1 << (plane - 1)
@@ -1412,23 +1469,13 @@ mod tests {
                 assert_eq!(seg.ptr, ptr, "wrong ptr at row {row} plane {plane}");
                 assert_eq!(
                     seg.len,
-                    plane_len * (TEST_PLANES - plane),
+                    plane_len * (TEST_PLANES - plane) + TRAILER_BYTES,
                     "wrong len at row {row} plane {plane}"
                 );
                 assert_eq!(
                     seg.reps, expected_reps,
                     "wrong reps at row {row} plane {plane}"
                 );
-            }
-
-            // The end-of-row trailer (if any) is last.
-            if HAS_TRAILER {
-                let trailer_idx = row * segments_per_row + TEST_PLANES + gap;
-                let seg = fb.bcm_segment(trailer_idx);
-                let (ptr, len) = fb.trailer_ptr_len(row);
-                assert_eq!(seg.ptr, ptr, "wrong trailer ptr at row {row}");
-                assert_eq!(seg.len, len, "wrong trailer len at row {row}");
-                assert_eq!(seg.reps, 1, "trailer reps must be 1 at row {row}");
             }
         }
     }
@@ -1437,9 +1484,7 @@ mod tests {
     fn bcm_segment_total_reps_per_row() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        let segments_per_row = TEST_PLANES + gap + trailer;
+        let segments_per_row = TEST_PLANES;
 
         for row in 0..16usize {
             // Suffix coalescing halves the per-row transfer count to
@@ -1447,11 +1492,9 @@ mod tests {
             // plane 1's extra rep adds one more.
             let mut pixel_reps = 0;
             for plane in 0..TEST_PLANES {
-                // Plane 0 is at offset 0, planes 1.. at offset 1 + gap.
-                let offset = if plane == 0 { 0 } else { plane + gap };
-                pixel_reps += fb.bcm_segment(row * segments_per_row + offset).reps;
+                pixel_reps += fb.bcm_segment(row * segments_per_row + plane).reps;
             }
-            let expected = if HAS_GAP {
+            let expected = if cfg!(feature = "inter-row-blank") {
                 (1 << (TEST_PLANES - 1)) + 1
             } else {
                 1 << (TEST_PLANES - 1)
@@ -1464,22 +1507,18 @@ mod tests {
     fn bcm_segment_plane_coverage_matches_bcm_weights() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        let segments_per_row = TEST_PLANES + gap + trailer;
-        let plane_bytes = TEST_COLS * core::mem::size_of::<Entry>();
+        let segments_per_row = TEST_PLANES;
 
         for row in 0..16usize {
             for plane in 0..TEST_PLANES {
                 // Sum the reps of every pixel segment that spans this plane:
-                // the segment for plane `first` covers `len / plane_bytes`
-                // consecutive planes starting at `first`.
+                // the segment for plane `first` covers `plane_suffix` planes
+                // starting at `first`.
                 let mut coverage = 0;
                 for first in 0..=plane {
-                    // Plane 0 is at offset 0, planes 1.. at offset 1 + gap.
-                    let offset = if first == 0 { 0 } else { first + gap };
-                    let seg = fb.bcm_segment(row * segments_per_row + offset);
-                    if first + seg.len / plane_bytes > plane {
+                    let seg = fb.bcm_segment(row * segments_per_row + first);
+                    let (covered, _) = plane_suffix(first, TEST_PLANES);
+                    if first + covered > plane {
                         coverage += seg.reps;
                     }
                 }
@@ -1497,10 +1536,7 @@ mod tests {
     fn bcm_segment_panics_for_invalid_index() {
         use crate::FrameBuffer;
         let fb = TestBuffer::new();
-        let gap = if HAS_GAP { 1 } else { 0 };
-        let trailer = if HAS_TRAILER { 1 } else { 0 };
-        let segments_per_row = TEST_PLANES + gap + trailer;
-        let _ = fb.bcm_segment(16 * segments_per_row);
+        let _ = fb.bcm_segment(16 * TEST_PLANES);
     }
 
     #[test]
@@ -1546,19 +1582,12 @@ mod tests {
         fb.set_pixel(Point::new(10, 0), Color::WHITE);
 
         let col_idx = map_index(10);
-        let gap = usize::from(HAS_GAP);
-        let trailer = usize::from(HAS_TRAILER);
         // Physical slot holding logical row 0 (reversed by reverse-row-order).
-        let row0_base = map_row_index::<32>(0) * (5 + gap + trailer);
+        let row0_base = map_row_index::<32>(0) * 5;
 
         for plane_idx in 0..5usize {
-            // Row 0: plane 0 is the slot's first segment, planes 1+ follow the
-            // gap segment.
-            let seg = fb.bcm_segment(if plane_idx == 0 {
-                row0_base
-            } else {
-                row0_base + plane_idx + gap
-            });
+            // Row 0: plane 0 is the slot's first segment, planes 1+ follow it.
+            let seg = fb.bcm_segment(row0_base + plane_idx);
 
             let data = unsafe { core::slice::from_raw_parts(seg.ptr as *const u16, TRINITY_COLS) };
             let raw = data[col_idx];
@@ -1605,18 +1634,11 @@ mod tests {
         }
 
         let mut any_nonzero = false;
-        let gap = usize::from(HAS_GAP);
-        let trailer = usize::from(HAS_TRAILER);
         // Physical slot holding logical row 0 (reversed by reverse-row-order).
-        let row0_base = map_row_index::<32>(0) * (5 + gap + trailer);
+        let row0_base = map_row_index::<32>(0) * 5;
         for plane_idx in 0..5usize {
-            // Row 0: plane 0 is the slot's first segment, planes 1+ follow the
-            // gap segment.
-            let seg = fb.bcm_segment(if plane_idx == 0 {
-                row0_base
-            } else {
-                row0_base + plane_idx + gap
-            });
+            // Row 0: plane 0 is the slot's first segment, planes 1+ follow it.
+            let seg = fb.bcm_segment(row0_base + plane_idx);
             let data = unsafe { core::slice::from_raw_parts(seg.ptr as *const u16, TRINITY_COLS) };
 
             for x in 0..TRINITY_COLS {

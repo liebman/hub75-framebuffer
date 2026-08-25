@@ -48,13 +48,16 @@ trail-blank-4 = []
 trail-blank-8 = []
 trail-blank-16 = []
 trail-blank-32 = []
-inter-row-blank-4 = []
-inter-row-blank-8 = []
-inter-row-blank-16 = []
-inter-row-blank-32 = []
+inter-row-blank-4 = ["inter-row-blank"]
+inter-row-blank-8 = ["inter-row-blank"]
+inter-row-blank-16 = ["inter-row-blank"]
+inter-row-blank-32 = ["inter-row-blank"]
 
 # this is for the plain framebuffer only
 tail-closes-latch = [] # add a tail word that closes the latch after the data is shifted in
+
+# internal non-public features; these are not meant to be enabled directly by users
+inter-row-blank = []
 
 [dev-dependencies]
 criterion = "0.6"

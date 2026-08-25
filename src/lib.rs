@@ -269,6 +269,9 @@
 //! ```
 //!
 //! **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
+//! The `inter-row-blank` feature (no number) is an internal umbrella that is
+//! enabled automatically by any `inter-row-blank-*` feature — do not enable it
+//! directly.
 //! These are independent of the `lead-blank-*` / `trail-blank-*` features and
 //! can be combined with them.
 //!
@@ -495,6 +498,19 @@ const _: () = assert!(
         <= 1,
     "inter-row-blank-* features are mutually exclusive"
 );
+
+// The `inter-row-blank` feature is an internal umbrella enabled by any
+// `inter-row-blank-*` feature; it must not be enabled on its own.
+#[cfg(all(
+    feature = "inter-row-blank",
+    not(any(
+        feature = "inter-row-blank-4",
+        feature = "inter-row-blank-8",
+        feature = "inter-row-blank-16",
+        feature = "inter-row-blank-32"
+    ))
+))]
+compile_error!("enable an inter-row-blank-* feature (4/8/16/32), not `inter-row-blank` directly");
 
 #[cfg(feature = "inter-row-blank-4")]
 pub(crate) const INTER_ROW_BLANK: usize = 4;
