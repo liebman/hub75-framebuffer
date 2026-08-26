@@ -9,6 +9,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### ⚠️ Breaking
+
+* The `FrameBuffer` trait's plane-oriented API was replaced by a BCM
+  segment API. **Removed:** `plane_count()`, `plane_ptr_len()`, and
+  `get_word_size()`. **Added:** a new `BcmLenReps` struct (`len`, `reps`),
+  required associated constant `BCM_SEQUENCE` (a `[BcmLenReps;
+  BCM_SEQUENCE_CAPACITY]` array describing one repeating period),
+  `BCM_SEQUENCE_LEN`, and `BCM_SEQUENCE_COUNT`, plus a required method
+  `bcm_segment_ptr(index) -> *const u8`. `bcm_segment(index) -> BcmSegment`
+  is now a **provided** method that combines `bcm_segment_ptr()` with the
+  static `(len, reps)` from `BCM_SEQUENCE`. `BCM_SEGMENT_COUNT` (default
+  `BCM_SEQUENCE_LEN * BCM_SEQUENCE_COUNT`) and `BCM_SEGMENTS_PER_GROUP`
+  (default `1`) are optional overrides; `bcm_segment_count()` /
+  `bcm_segments_per_group()` are provided methods reading the constants.
+  A free const fn `bcm_rep_count::<FB>()` computes the total repetition
+  count across a full refresh.
+
+  **Migration:** downstream `FrameBuffer` implementors must delete their
+  `plane_count()` / `plane_ptr_len()` implementations and add `BCM_SEQUENCE`
+  plus `bcm_segment_ptr()`. Drivers that iterated planes via
+  `plane_ptr_len()` must now iterate `bcm_segment(0..bcm_segment_count())`,
+  streaming `reps` transfers of `len` bytes from `ptr` per segment.
+
+* `tiling::QuarterScan` gained a wiring-variant type parameter
+  (`QuarterScan<ROWS, COLS, V = quarter_scan::SectionsSwapped>`) and is no
+  longer value-constructible (private `PhantomData` field). Type-level usage
+  such as `QuarterScan<64, 64>` is source-compatible.
+
+* **Bitplane plane-major framebuffers now store planes LSB-first and emit
+  suffix-coalesced BCM segments** (`bitplane::plain::frame::DmaFrameBuffer`
+  and `bitplane::latched::frame::DmaFrameBuffer`). Plane 0 now carries the
+  LSB (previously the MSB), and the segment for plane `k` spans planes
+  `k..PLANES` with `2^(k-1)` repetitions (segment 0 spans all planes with 1
+  repetition), halving the number of DMA transfers per frame (`2^(PLANES-1)`
+  instead of `2^PLANES - 1`) with identical brightness. The segment count
+  (`PLANES` per frame, one segment per group) is unchanged, but segment
+  `len`/`reps` values changed.
+
+  **Migration:** drivers must no longer assume one segment == one plane: a
+  segment's `len` may exceed the platform's maximum DMA transfer size, so
+  on such platforms a segment must be split across multiple DMA
+  descriptors (`BCM_SEQUENCE` exposes the static `len`/`reps` data
+  needed to size descriptor tables at compile time). Per-group ISR cadence
+  is unchanged (`PLANES` groups per frame), but inter-ISR intervals
+  changed, and the longest contiguous single-plane (MSB) run per frame is
+  now `2^(PLANES-2)` plane passes.
+
+### Added
+
+* `reverse-row-order` feature storing the rows of every framebuffer layout in
+  reverse scan order, so the DMA stream renders the last panel row first and
+  row 0 last. `format()` writes the row addresses back-to-front (keeping the
+  deferred address-change invariant intact) and the pixel-setting paths remap
+  the logical row index to the reversed memory slot, so logical coordinates
+  are unchanged. Applies to all six framebuffer implementations
+  (`plain`, `latched`, `bitplane::plain::{frame, row}`, and
+  `bitplane::latched::{frame, row}`), and hence to the `tiling` wrappers that
+  delegate to them.
+
+* `lead-blank-32` and `trail-blank-32` features extending blanking delay options to 32 pixel-clock cycles.
+
+* **Row-major bitplane framebuffer** (`bitplane::plain::row::DmaFrameBuffer`).
+  Groups all bit-planes for a single row contiguously instead of storing entire
+  planes together. Optimized for row-by-row BCM rendering where the driver
+  replays each plane's pixel data for brightness weighting before moving to the
+  next row, reducing ghosting on panels with slow row drivers. Planes are stored
+  LSB-first and contiguously, so each BCM segment streams a contiguous suffix
+  of planes. The `inter-row-blank-*` gap is streamed between plane 0 (shifted
+  out with the previous row's address) and plane 1 (whose first pixel changes
+  the address), holding `prev_addr` with `OE` blank.
+
+* **Row-major latched bitplane framebuffer** (`bitplane::latched::row::DmaFrameBuffer`).
+  Groups all bit-planes for a single row contiguously, each followed by its
+  four address bytes, instead of storing entire planes together. Planes are
+  stored LSB-first and every plane carries the current row address — the
+  external latch holds the previous row's address during plane 0's shift, so
+  no `prev_addr` handling is needed. Blanking mirrors the plain row-major
+  layout: the `lead-blank-*` delay applies to the first plane (whose address
+  bytes change the row address) and the `trail-blank-*` delay to the second
+  plane; all other planes run full-width. The `inter-row-blank-*` gap is
+  streamed between plane 0 (whose address bytes latch the data and change
+  the row address) and plane 1.
+
+* `skip-black-pixels` support `bitplane::plain::{frame, row}` and `bitplane::latched::{frame, row}`.
+
+* Compile-time validation of `NROWS` (1..=32) and `PLANES` (1..=8) for all
+  bitplane framebuffers. Invalid configurations now panic in `const fn new()`
+  — a compile-time error for `static` framebuffers — instead of silently
+  corrupting the DMA stream.
+
+* `tiling::QuarterScan` is now implemented for classic 1/16-scan 64×64 panels
+  (16 row addresses, four rows lit at a time). The four quarters of the panel
+  are mapped to side-by-side 64-column sections via a pluggable wiring variant
+  (the third type parameter — see `tiling::quarter_scan`): built-in variants
+  are `SectionsSwapped` (the default, verified on hardware), `Linear`,
+  `HalvesSwapped` and `Alternating`, and custom wirings can be added by
+  implementing `quarter_scan::Variant` downstream. The default places rows
+  0–15 on channel 1 section 1, rows 16–31 on channel 1 section 0, rows 32–47
+  on channel 2 section 1 and rows 48–63 on channel 2 section 0. The
+  framebuffer geometry
+  changed accordingly: `FB_ROWS` is now `PANEL_ROWS / 2` (32) and `FB_COLS`
+  is `PANEL_COLS * 2` (128) — previously the stub declared a 16×256 geometry
+  (8 addresses) that matched no real 1/16-scan panel and its `remap_xy`
+  panicked with `todo!()`. Pair with a bitplane
+  `DmaFrameBuffer<{ PANEL_ROWS / 4 }, { PANEL_COLS * 2 }, PLANES>`.
+  Coordinates outside the virtual canvas are clipped (mapped just past the
+  inner framebuffer's bounds) instead of panicking, matching the clipping
+  behavior embedded-graphics draw operations rely on.
+
 ## [0.11.0] - 2026-08-02
 
 ### Added

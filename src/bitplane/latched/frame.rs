@@ -1,197 +1,43 @@
-//! Bitplane framebuffer for an 8-bit latched HUB75 interface.
+//! Plane-major bitplane framebuffer for an 8-bit latched HUB75 interface.
 //!
-//! This module provides a framebuffer that stores colour data as separate
-//! bit-planes rather than the threshold-based frames used by
-//! [`crate::latched::DmaFrameBuffer`]. Each plane holds one bit of every
-//! colour channel, giving `PLANES` planes total (typically 8 for full 8-bit
-//! colour). Row addressing is carried by four trailing `Address` bytes per
-//! row, identical to the non-bitplane latched layout.
+//! Stores all rows for one bit-plane contiguously, then the next plane, etc.
+//! Planes are stored **LSB-first**: plane 0 carries the LSB (bit 0) of each
+//! colour channel and is displayed once per frame, plane `PLANES-1` carries
+//! the MSB (bit 7) and is displayed `2^(PLANES-1)` times per frame.
 //!
-//! # Hardware Requirements
-//! Requires a parallel output peripheral capable of clocking 8 bits at a time,
-//! plus an external latch circuit to hold the row address and gate the pixel
-//! clock (same circuit as the non-bitplane latched variant).
+//! Each row is `COLS` data bytes plus 4 address bytes (and an optional
+//! inter-row gap), so total size is
+//! `PLANES × NROWS × (COLS + 4 + INTER_ROW_BLANK)` bytes.
 //!
-//! # HUB75 Signal Bit Mapping (8-bit words)
-//! Two distinct 8-bit words are streamed to the panel:
+//! # DMA Descriptor Pattern
 //!
-//! 1. **Address / Timing (`Address`)** -- row-select and latch control.
-//! 2. **Pixel Data (`Entry`)** -- RGB bits for two sub-pixels plus OE/LAT
-//!    shadow bits.
-//!
-//! ```text
-//! Address word (row select & timing)
-//! ┌──7─┬──6──┬─5─-┬─4─-┬─3-─┬─2-─┬─1-─┬─0-─┐
-//! │ OE │ LAT │    │ E  │ D  │ C  │ B  │ A  │
-//! └────┴─────┴───-┴───-┴───-┴───-┴───-┴───-┘
-//! ```
-//! ```text
-//! Entry word (pixel data)
-//! ┌──7─┬──6──┬─5──┬─4──┬─3──┬─2──┬─1──┬─0──┐
-//! │ OE │ LAT │ B2 │ G2 │ R2 │ B1 │ G1 │ R1 │
-//! └────┴─────┴────┴────┴────┴────┴────┴────┘
-//! ```
-//!
-//! Bits 7-6 (OE/LAT) occupy the same positions in both words so the control
-//! lines stay valid throughout the DMA stream.
-//!
-//! # Bitplane BCM Rendering
-//! The framebuffer is organised into `PLANES` bit-planes. Plane 0 carries the
-//! MSB (bit 7) of each colour channel, plane 1 carries bit 6, and so on down
-//! to plane 7 which carries the LSB (bit 0).
-//!
-//! To produce correct brightness via Binary Code Modulation, configure the DMA
-//! descriptor chain so that each plane's data is output (scanned) a number of
-//! times equal to its bit-weight:
+//! The planes are contiguous (`repr(C)`), so each BCM segment streams a
+//! whole *suffix* of planes: the segment for plane `k` starts at plane `k`
+//! and covers planes `k..PLANES`, repeated just enough times to bring plane
+//! `k`'s total coverage to `2^k` displays per frame. This halves the number
+//! of DMA transfers per frame — `2^(PLANES-1)` instead of `2^PLANES - 1` —
+//! while the streamed bytes, and therefore the brightness, are unchanged.
+//! The four address bytes and the inter-row gap (both embedded in each row)
+//! travel inside the coalesced segments automatically.
 //!
 //! ```text
-//! plane 0 (bit 7) → output 2^7 = 128 times
-//! plane 1 (bit 6) → output 2^6 =  64 times
-//! plane 2 (bit 5) → output 2^5 =  32 times
-//!   …
-//! plane 7 (bit 0) → output 2^0 =   1 time
+//! planes 0..PLANES      × 1 rep        → planes[0..]
+//! planes 1..PLANES      × 1 rep        → planes[1..]
+//! planes 2..PLANES      × 2 reps       → planes[2..]
+//! …
+//! plane  PLANES-1 (MSB) × 2^(PLANES-2) → planes[PLANES-1]
 //! ```
-//!
-//! That is, each plane is scanned `2^(7 - plane_index)` times. The weighted
-//! repetition counts sum to 255, reproducing the full 8-bit intensity range.
-//! See <https://www.batsocks.co.uk/readme/art_bcm_1.htm> for background on
-//! BCM.
-//!
-//! # Memory Usage
-//! Memory scales linearly with `PLANES`: the buffer contains `PLANES` copies
-//! of the row data (one per bit-plane). Unlike the threshold-based
-//! [`crate::latched::DmaFrameBuffer`] whose frame count grows as
-//! `2^BITS - 1`, this layout uses exactly `PLANES` planes regardless of
-//! colour depth.
-//!
-//! Each row is `COLS` data bytes plus 4 address bytes, so total size is
-//! `PLANES * NROWS * (COLS + 4)` bytes.
 
 use core::convert::Infallible;
 
-use bitfield::bitfield;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, Point, Size};
 
+use super::{make_data_template, map_index, Address, Entry, ADDR_TABLE, INTER_ROW_BLANK, OE_BLANK};
 use crate::Color;
-use crate::FrameBuffer;
+use crate::{map_row_index, slot_addresses};
+use crate::{BcmLenReps, FrameBuffer, BCM_SEQUENCE_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
-
-#[cfg(feature = "lead-blank-1")]
-const LEAD_BLANK_DELAY: usize = 1;
-#[cfg(feature = "lead-blank-2")]
-const LEAD_BLANK_DELAY: usize = 2;
-#[cfg(feature = "lead-blank-4")]
-const LEAD_BLANK_DELAY: usize = 4;
-#[cfg(feature = "lead-blank-8")]
-const LEAD_BLANK_DELAY: usize = 8;
-#[cfg(feature = "lead-blank-16")]
-const LEAD_BLANK_DELAY: usize = 16;
-
-#[cfg(not(any(
-    feature = "lead-blank-1",
-    feature = "lead-blank-2",
-    feature = "lead-blank-4",
-    feature = "lead-blank-8",
-    feature = "lead-blank-16"
-)))]
-const LEAD_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "trail-blank-1")]
-const TRAIL_BLANK_DELAY: usize = 1;
-#[cfg(feature = "trail-blank-2")]
-const TRAIL_BLANK_DELAY: usize = 2;
-#[cfg(feature = "trail-blank-4")]
-const TRAIL_BLANK_DELAY: usize = 4;
-#[cfg(feature = "trail-blank-8")]
-const TRAIL_BLANK_DELAY: usize = 8;
-#[cfg(feature = "trail-blank-16")]
-const TRAIL_BLANK_DELAY: usize = 16;
-
-#[cfg(not(any(
-    feature = "trail-blank-1",
-    feature = "trail-blank-2",
-    feature = "trail-blank-4",
-    feature = "trail-blank-8",
-    feature = "trail-blank-16"
-)))]
-const TRAIL_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "inter-row-blank-4")]
-const INTER_ROW_BLANK: usize = 4;
-#[cfg(feature = "inter-row-blank-8")]
-const INTER_ROW_BLANK: usize = 8;
-#[cfg(feature = "inter-row-blank-16")]
-const INTER_ROW_BLANK: usize = 16;
-#[cfg(feature = "inter-row-blank-32")]
-const INTER_ROW_BLANK: usize = 32;
-#[cfg(not(any(
-    feature = "inter-row-blank-4",
-    feature = "inter-row-blank-8",
-    feature = "inter-row-blank-16",
-    feature = "inter-row-blank-32"
-)))]
-const INTER_ROW_BLANK: usize = 0;
-
-#[cfg(not(feature = "invert-oe"))]
-const OE_ACTIVE: u8 = 0b1000_0000;
-#[cfg(not(feature = "invert-oe"))]
-const OE_BLANK: u8 = 0;
-
-#[cfg(feature = "invert-oe")]
-const OE_ACTIVE: u8 = 0;
-#[cfg(feature = "invert-oe")]
-const OE_BLANK: u8 = 0b1000_0000;
-
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq, Eq)]
-    #[repr(transparent)]
-    pub(crate) struct Address(u8);
-    impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) addr, set_addr: 4, 0;
-}
-
-impl Address {
-    pub const fn new() -> Self {
-        Self(0)
-    }
-}
-
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq)]
-    #[repr(transparent)]
-    pub(crate) struct Entry(u8);
-    impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) blu2, set_blu2: 5;
-    pub(crate) grn2, set_grn2: 4;
-    pub(crate) red2, set_red2: 3;
-    pub(crate) blu1, set_blu1: 2;
-    pub(crate) grn1, set_grn1: 1;
-    pub(crate) red1, set_red1: 0;
-}
-
-impl Entry {
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    const COLOR0_MASK: u8 = 0b0000_0111;
-    const COLOR1_MASK: u8 = 0b0011_1000;
-
-    #[inline]
-    fn set_color0_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR0_MASK) | (bits & Self::COLOR0_MASK);
-    }
-
-    #[inline]
-    fn set_color1_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR1_MASK) | ((bits << 3) & Self::COLOR1_MASK);
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
@@ -203,50 +49,6 @@ pub struct Row<const COLS: usize> {
     pub(crate) data: [Entry; COLS],
     pub(crate) address: [Address; 4],
     pub(crate) gap: [Entry; INTER_ROW_BLANK],
-}
-
-#[inline]
-const fn map_index(index: usize) -> usize {
-    #[cfg(feature = "esp32-ordering")]
-    {
-        index ^ 2
-    }
-    #[cfg(not(feature = "esp32-ordering"))]
-    {
-        index
-    }
-}
-
-const fn make_addr_table() -> [[Address; 4]; 32] {
-    let mut tbl = [[Address::new(); 4]; 32];
-    let mut addr = 0;
-    while addr < 32 {
-        tbl[addr][map_index(0)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(1)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(2)].0 = OE_BLANK | addr as u8;
-        tbl[addr][map_index(3)].0 = OE_BLANK;
-        addr += 1;
-    }
-    tbl
-}
-
-const ADDR_TABLE: [[Address; 4]; 32] = make_addr_table();
-
-#[allow(clippy::absurd_extreme_comparisons)]
-const fn make_data_template<const COLS: usize>() -> [Entry; COLS] {
-    let mut data = [Entry::new(); COLS];
-    let mut i = 0;
-    while i < COLS {
-        let mapped_i = map_index(i);
-        data[mapped_i].0 =
-            if i >= TRAIL_BLANK_DELAY && i < COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
-                OE_ACTIVE
-            } else {
-                OE_BLANK
-            };
-        i += 1;
-    }
-    data
 }
 
 impl<const COLS: usize> Row<COLS> {
@@ -303,9 +105,43 @@ impl<const COLS: usize> Default for Row<COLS> {
     }
 }
 
+/// Coalesced BCM suffix for plane `plane_idx`: returns
+/// `(covered_planes, reps)` — how many planes the segment spans (starting at
+/// `plane_idx`) and how many times that suffix is streamed. See the
+/// module-level "DMA Descriptor Pattern" section for the full scheme.
+const fn plane_suffix(plane_idx: usize, planes: usize) -> (usize, usize) {
+    let covered = planes - plane_idx;
+    let reps = if plane_idx == 0 {
+        1
+    } else {
+        1 << (plane_idx - 1)
+    };
+    (covered, reps)
+}
+
+/// BCM sequence for one complete frame: one entry per plane, each streaming
+/// the contiguous plane suffix `plane..PLANES`. Entries past `PLANES` are
+/// zero padding.
+const fn bcm_sequence<const NROWS: usize, const COLS: usize, const PLANES: usize>(
+) -> [BcmLenReps; BCM_SEQUENCE_CAPACITY] {
+    assert!(PLANES <= BCM_SEQUENCE_CAPACITY);
+    let plane_bytes = NROWS * core::mem::size_of::<Row<COLS>>();
+    let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
+    let mut plane = 0usize;
+    while plane < PLANES {
+        let (covered, reps) = plane_suffix(plane, PLANES);
+        seq[plane] = BcmLenReps {
+            len: plane_bytes * covered,
+            reps,
+        };
+        plane += 1;
+    }
+    seq
+}
+
 /// The entire BCM Frame Buffer (Contiguous Memory)
 #[derive(Copy, Clone)]
-#[repr(C)]
+#[repr(C, align(4))]
 pub struct DmaFrameBuffer<const NROWS: usize, const COLS: usize, const PLANES: usize> {
     pub(crate) planes: [[Row<COLS>; NROWS]; PLANES],
 }
@@ -314,8 +150,23 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     DmaFrameBuffer<NROWS, COLS, PLANES>
 {
     /// Creates a new frame buffer.
+    ///
+    /// # Panics
+    /// Panics if `NROWS` is not within `1..=32` (5-bit row address) or
+    /// `PLANES` is not within `1..=8` (8-bit color depth). With the
+    /// `esp32-ordering` feature, also panics if `COLS` is not divisible
+    /// by 4 (the ESP32's byte-order rearrangement requires column counts
+    /// that are multiples of 4). In const contexts (e.g. `static`
+    /// framebuffers) this is a compile-time error.
     #[must_use]
     pub const fn new() -> Self {
+        assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
+        assert!(PLANES >= 1 && PLANES <= 8, "PLANES must be within 1..=8");
+        #[cfg(feature = "esp32-ordering")]
+        assert!(
+            COLS % 4 == 0,
+            "esp32-ordering feature requires COLS to be divisible by 4"
+        );
         let mut instance = Self {
             planes: [[Row::new(); NROWS]; PLANES],
         };
@@ -325,12 +176,14 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
 
     /// Returns the number of BCM chunks (one per bit-plane).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_count() -> usize {
         PLANES
     }
 
     /// Returns the byte size of one BCM chunk (a single bit-plane).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         NROWS * core::mem::size_of::<Row<COLS>>()
     }
@@ -346,10 +199,11 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     pub const fn format(&mut self) {
         let mut p = 0;
         while p < PLANES {
-            let mut row_idx = 0;
-            while row_idx < NROWS {
-                self.planes[p][row_idx].format(row_idx as u8);
-                row_idx += 1;
+            let mut slot = 0;
+            while slot < NROWS {
+                let (_, addr) = slot_addresses::<NROWS>(slot);
+                self.planes[p][slot].format(addr);
+                slot += 1;
             }
             p += 1;
         }
@@ -383,14 +237,21 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             return;
         }
 
-        let row_idx = if y < NROWS { y } else { y - NROWS };
+        // Early exit for black pixels - common in UI backgrounds
+        // Only enabled when skip-black-pixels feature is active
+        #[cfg(feature = "skip-black-pixels")]
+        if color == Color::BLACK {
+            return;
+        }
+
+        let row_idx = map_row_index::<NROWS>(if y < NROWS { y } else { y - NROWS });
         let is_top = y < NROWS;
         let red = color.r();
         let green = color.g();
         let blue = color.b();
 
         for plane_idx in 0..PLANES {
-            let bit = 7_u32.saturating_sub(plane_idx as u32);
+            let bit = (8 - PLANES + plane_idx) as u32;
             let bits = ((u8::from(((blue >> bit) & 1) != 0)) << 2)
                 | ((u8::from(((green >> bit) & 1) != 0)) << 1)
                 | u8::from(((red >> bit) & 1) != 0);
@@ -445,18 +306,18 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> FrameBuffer
 {
     type Word = u8;
 
-    fn plane_count(&self) -> usize {
-        PLANES
-    }
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = bcm_sequence::<NROWS, COLS, PLANES>();
 
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
+    const BCM_SEQUENCE_LEN: usize = PLANES;
+
+    const BCM_SEQUENCE_COUNT: usize = 1;
+
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
         assert!(
-            plane_idx < PLANES,
-            "plane_idx {plane_idx} out of range for {PLANES} planes"
+            index < PLANES,
+            "segment index {index} out of range for {PLANES} planes"
         );
-        let ptr = self.planes[plane_idx].as_ptr().cast::<u8>();
-        let len = NROWS * core::mem::size_of::<Row<COLS>>();
-        (ptr, len)
+        self.planes[index].as_ptr().cast::<u8>()
     }
 }
 
@@ -498,6 +359,9 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
         I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
     {
         for pixel in pixels {
+            if pixel.0.x < 0 || pixel.0.y < 0 {
+                continue;
+            }
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
@@ -508,15 +372,21 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
 mod tests {
     extern crate std;
 
+    use super::super::{make_addr_table, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
     use super::*;
     use embedded_graphics::prelude::*;
     use std::format;
 
-    type TestBuffer = DmaFrameBuffer<16, 64, 8>;
+    const TEST_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+        128
+    } else {
+        64
+    };
+    type TestBuffer = DmaFrameBuffer<16, TEST_COLS, 8>;
 
     #[test]
     fn row_format_sets_address_and_control_bits() {
-        const TEST_N: usize = 64;
+        const TEST_N: usize = TEST_COLS;
         let mut row = Row::<TEST_N>::new();
         row.format(5);
         let latch_count = row.address.iter().filter(|a| a.latch()).count();
@@ -542,11 +412,12 @@ mod tests {
         fb.format();
 
         for plane_idx in 0..8 {
-            for row_idx in 0..16 {
-                let row = &fb.planes[plane_idx][row_idx];
-                assert_eq!(row.address[map_index(0)].addr(), row_idx as u8);
-                assert_eq!(row.address[map_index(1)].addr(), row_idx as u8);
-                assert_eq!(row.address[map_index(2)].addr(), row_idx as u8);
+            for slot in 0..16 {
+                let (_, addr) = slot_addresses::<16>(slot);
+                let row = &fb.planes[plane_idx][slot];
+                assert_eq!(row.address[map_index(0)].addr(), addr);
+                assert_eq!(row.address[map_index(1)].addr(), addr);
+                assert_eq!(row.address[map_index(2)].addr(), addr);
                 assert_eq!(row.address[map_index(3)].0, OE_BLANK);
             }
         }
@@ -559,8 +430,8 @@ mod tests {
         fb.set_pixel(Point::new(2, 3), color);
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][3].data[map_index(2)];
+            let bit = plane_idx;
+            let entry = fb.planes[plane_idx][map_row_index::<16>(3)].data[map_index(2)];
             assert_eq!(entry.red1(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn1(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu1(), ((color.b() >> bit) & 1) != 0);
@@ -574,8 +445,8 @@ mod tests {
         fb.set_pixel(Point::new(4, 20), color);
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][4].data[map_index(4)];
+            let bit = plane_idx;
+            let entry = fb.planes[plane_idx][map_row_index::<16>(4)].data[map_index(4)];
             assert_eq!(entry.red2(), ((color.r() >> bit) & 1) != 0);
             assert_eq!(entry.grn2(), ((color.g() >> bit) & 1) != 0);
             assert_eq!(entry.blu2(), ((color.b() >> bit) & 1) != 0);
@@ -583,9 +454,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn reverse_row_order_stores_rows_back_to_front() {
+        let mut fb = TestBuffer::new();
+
+        // Slot 0 is streamed first and renders the last panel row; the final
+        // slot renders panel row 0. The address bytes carry the slot's own
+        // row address.
+        assert_eq!(fb.planes[0][0].address[map_index(0)].addr(), 15);
+        assert_eq!(fb.planes[0][15].address[map_index(0)].addr(), 0);
+
+        // Logical row 0 maps to the last memory slot.
+        fb.set_pixel(Point::new(2, 0), Color::RED);
+        let col2 = map_index(2);
+        assert!(fb.planes[7][15].data[col2].red1());
+        assert!(!fb.planes[7][0].data[col2].red1());
+    }
+
+    #[test]
     fn erase_clears_only_color_bits() {
         let mut fb = TestBuffer::new();
-        let oe_before = fb.planes[0][0].data[0].output_enable();
+        let oe_before = fb.planes[0][map_row_index::<16>(0)].data[0].output_enable();
         fb.set_pixel(Point::new(0, 0), Color::WHITE);
         fb.erase();
 
@@ -602,7 +491,10 @@ mod tests {
             }
         }
 
-        assert_eq!(fb.planes[0][0].data[0].output_enable(), oe_before);
+        assert_eq!(
+            fb.planes[0][map_row_index::<16>(0)].data[0].output_enable(),
+            oe_before
+        );
     }
 
     #[test]
@@ -613,8 +505,8 @@ mod tests {
         assert!(result.is_ok());
 
         for plane_idx in 0..8 {
-            let bit = 7 - plane_idx;
-            let entry = fb.planes[plane_idx][1].data[map_index(1)];
+            let bit = plane_idx;
+            let entry = fb.planes[plane_idx][map_row_index::<16>(1)].data[map_index(1)];
             assert_eq!(entry.red1(), ((Color::RED.r() >> bit) & 1) != 0);
             assert!(!entry.grn1());
             assert!(!entry.blu1());
@@ -627,43 +519,83 @@ mod tests {
         let before = fb.planes;
         fb.set_pixel(Point::new(-1, 0), Color::WHITE);
         fb.set_pixel(Point::new(0, -1), Color::WHITE);
-        fb.set_pixel(Point::new(64, 0), Color::WHITE);
+        fb.set_pixel(Point::new(TEST_COLS as i32, 0), Color::WHITE);
         fb.set_pixel(Point::new(0, 32), Color::WHITE);
         assert_eq!(fb.planes, before);
     }
 
     #[test]
+    #[cfg(feature = "skip-black-pixels")]
+    fn test_skip_black_pixels_enabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels enabled, this should be ignored
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should still be red (black write was skipped)
+        assert!(fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[cfg(not(feature = "skip-black-pixels"))]
+    fn test_skip_black_pixels_disabled() {
+        let mut fb = TestBuffer::new();
+
+        // Set a red pixel first
+        fb.set_pixel_internal(10, 5, Color::RED);
+
+        // Verify it's red in the first plane
+        let mapped_col_10 = map_index(10);
+        assert!(fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].blu1());
+
+        // Now set it to black - with skip-black-pixels disabled, this should overwrite
+        fb.set_pixel_internal(10, 5, Color::BLACK);
+
+        // The pixel should now be black (all bits false)
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].red1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].grn1());
+        assert!(!fb.planes[0][map_row_index::<16>(5)].data[mapped_col_10].blu1());
+    }
+
+    #[test]
+    #[should_panic(expected = "NROWS must be within 1..=32")]
+    fn new_panics_for_too_many_rows() {
+        let _ = DmaFrameBuffer::<33, TEST_COLS, 8>::new();
+    }
+
+    #[test]
+    #[should_panic(expected = "PLANES must be within 1..=8")]
+    fn new_panics_for_too_many_planes() {
+        let _ = DmaFrameBuffer::<16, TEST_COLS, 9>::new();
+    }
+
+    #[test]
+    #[allow(deprecated)]
     fn bcm_chunk_info_for_common_panel() {
         assert_eq!(TestBuffer::bcm_chunk_count(), 8);
         assert_eq!(
             TestBuffer::bcm_chunk_bytes(),
-            16 * core::mem::size_of::<Row<64>>()
+            16 * core::mem::size_of::<Row<TEST_COLS>>()
         );
-    }
-
-    #[test]
-    fn frame_buffer_trait_accessors_report_expected_values() {
-        let fb = TestBuffer::new();
-        let as_trait: &dyn FrameBuffer<Word = u8> = &fb;
-        assert_eq!(as_trait.get_word_size(), crate::WordSize::Eight);
-        assert_eq!(as_trait.plane_count(), 8);
-
-        let (ptr, len) = as_trait.plane_ptr_len(0);
-        assert_eq!(len, 16 * core::mem::size_of::<Row<64>>());
-        assert_eq!(ptr, fb.planes[0].as_ptr().cast::<u8>());
-    }
-
-    #[test]
-    #[should_panic(expected = "out of range")]
-    fn plane_ptr_len_panics_for_invalid_plane() {
-        let fb = TestBuffer::new();
-        let _ = fb.plane_ptr_len(8);
     }
 
     #[test]
     fn origin_dimensions_match_panel_geometry() {
         let fb = TestBuffer::new();
-        assert_eq!(fb.size(), Size::new(64, 32));
+        assert_eq!(fb.size(), Size::new(TEST_COLS as u32, 32));
     }
 
     #[test]
@@ -677,7 +609,7 @@ mod tests {
 
     #[test]
     fn row_format_sets_exactly_one_data_word_with_oe_low() {
-        const TEST_N: usize = 64;
+        const TEST_N: usize = TEST_COLS;
         let mut row = Row::<TEST_N>::new();
         row.format(9);
 
@@ -696,8 +628,8 @@ mod tests {
 
     #[test]
     fn default_constructors_match_new() {
-        let row_default = Row::<64>::default();
-        let row_new = Row::<64>::new();
+        let row_default = Row::<TEST_COLS>::default();
+        let row_new = Row::<TEST_COLS>::new();
         assert_eq!(row_default, row_new);
 
         let fb_default = TestBuffer::default();
@@ -710,7 +642,7 @@ mod tests {
         let mut fb = TestBuffer::new();
         FrameBufferOperations::set_pixel(&mut fb, Point::new(3, 5), Color::GREEN);
 
-        assert!(fb.planes[0][5].data[map_index(3)].grn1());
+        assert!(fb.planes[0][map_row_index::<16>(5)].data[map_index(3)].grn1());
 
         FrameBufferOperations::erase(&mut fb);
         for plane in &fb.planes {
@@ -749,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_blanking_delay() {
-        let mut row = Row::<64>::new();
+        let mut row = Row::<TEST_COLS>::new();
         row.format(5);
 
         let oe_active = !cfg!(feature = "invert-oe");
@@ -764,13 +696,13 @@ mod tests {
         assert_eq!(row.data[first_active_idx].output_enable(), oe_active);
 
         // Lead blank: indices before latch (DMA end = physical left edge)
-        let last_active_idx = map_index(64 - LEAD_BLANK_DELAY - 2);
+        let last_active_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 2);
         assert_eq!(row.data[last_active_idx].output_enable(), oe_active);
 
-        let lead_blank_idx = map_index(64 - LEAD_BLANK_DELAY - 1);
+        let lead_blank_idx = map_index(TEST_COLS - LEAD_BLANK_DELAY - 1);
         assert_eq!(row.data[lead_blank_idx].output_enable(), !oe_active);
 
-        let last_pixel_idx = map_index(63);
+        let last_pixel_idx = map_index(TEST_COLS - 1);
         assert_eq!(row.data[last_pixel_idx].output_enable(), !oe_active);
     }
 
@@ -811,6 +743,104 @@ mod tests {
                     "re-formatted vs static mismatch at plane {pi}, row {ri}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn bcm_segment_count_equals_planes() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        assert_eq!(fb.bcm_segment_count(), 8);
+    }
+
+    #[test]
+    fn bcm_segments_have_correct_reps() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        for i in 0..8 {
+            let seg = fb.bcm_segment(i);
+            let expected = if i == 0 { 1 } else { 1 << (i - 1) };
+            assert_eq!(seg.reps, expected, "wrong reps for segment {i}");
+        }
+    }
+
+    #[test]
+    fn bcm_segments_point_to_plane_data() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let plane_len = 16 * core::mem::size_of::<Row<TEST_COLS>>();
+        for i in 0..8 {
+            let seg = fb.bcm_segment(i);
+            let expected_ptr = fb.planes[i].as_ptr().cast::<u8>();
+            assert_eq!(seg.ptr, expected_ptr, "wrong ptr for segment {i}");
+            assert_eq!(seg.len, plane_len * (8 - i), "wrong len for segment {i}");
+        }
+    }
+
+    #[test]
+    fn bcm_segment_total_reps_is_halved_by_coalescing() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let total: usize = (0..fb.bcm_segment_count())
+            .map(|i| fb.bcm_segment(i).reps)
+            .sum();
+        assert_eq!(total, 1 << (8 - 1));
+    }
+
+    #[test]
+    fn bcm_segment_plane_coverage_matches_bcm_weights() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let plane_bytes = 16 * core::mem::size_of::<Row<TEST_COLS>>();
+
+        for plane in 0..8usize {
+            // Sum the reps of every segment that spans this plane: the
+            // segment for plane `first` covers `len / plane_bytes`
+            // consecutive planes starting at `first`.
+            let mut coverage = 0;
+            for first in 0..=plane {
+                let seg = fb.bcm_segment(first);
+                if first + seg.len / plane_bytes > plane {
+                    coverage += seg.reps;
+                }
+            }
+            assert_eq!(coverage, 1 << plane, "plane {plane} coverage wrong");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn bcm_segment_panics_for_invalid_index() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        let _ = fb.bcm_segment(8);
+    }
+
+    #[test]
+    fn bcm_sequence_matches_runtime_segments() {
+        use crate::FrameBuffer;
+        let fb = TestBuffer::new();
+        assert_eq!(
+            TestBuffer::BCM_SEGMENT_COUNT,
+            TestBuffer::BCM_SEQUENCE_LEN * TestBuffer::BCM_SEQUENCE_COUNT
+        );
+        assert_eq!(fb.bcm_segment_count(), TestBuffer::BCM_SEGMENT_COUNT);
+        assert_eq!(
+            fb.bcm_segments_per_group(),
+            TestBuffer::BCM_SEGMENTS_PER_GROUP
+        );
+        assert_eq!(
+            TestBuffer::BCM_SEQUENCE_LEN % TestBuffer::BCM_SEGMENTS_PER_GROUP,
+            0
+        );
+        for i in 0..TestBuffer::BCM_SEGMENT_COUNT {
+            let entry = TestBuffer::BCM_SEQUENCE[i % TestBuffer::BCM_SEQUENCE_LEN];
+            let seg = fb.bcm_segment(i);
+            assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
+            assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
+        }
+        for entry in &TestBuffer::BCM_SEQUENCE[TestBuffer::BCM_SEQUENCE_LEN..] {
+            assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
 }

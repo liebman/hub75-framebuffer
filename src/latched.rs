@@ -1,6 +1,11 @@
 //! DMA-friendly framebuffer implementation for HUB75 LED panels with external
 //! latch circuit support.
 //!
+//! **Deprecated:** this threshold-frame layout is kept for legacy drivers
+//! whose DMA can stream a single circular buffer but cannot raise interrupts.
+//! New designs should use [`bitplane::latched`](crate::bitplane::latched),
+//! which scales linearly with color depth instead of exponentially.
+//!
 //! This module provides a framebuffer implementation with memory
 //! layout optimized for efficient transfer to HUB75 LED panels. The data is
 //! structured for direct signal mapping, making it ideal for DMA transfers but
@@ -172,68 +177,16 @@ doc = ::embed_doc_image::embed_image!("latch-circuit", "images/latch-circuit.png
 use core::convert::Infallible;
 
 use super::Color;
-use crate::{FrameBufferOperations, MutableFrameBuffer};
+use crate::{
+    map_row_index, slot_addresses, BcmLenReps, FrameBuffer, FrameBufferOperations,
+    MutableFrameBuffer, BCM_SEQUENCE_CAPACITY, INTER_ROW_BLANK, LEAD_BLANK_DELAY,
+    TRAIL_BLANK_DELAY,
+};
 use bitfield::bitfield;
 use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
-
-#[cfg(feature = "lead-blank-1")]
-const LEAD_BLANK_DELAY: usize = 1;
-#[cfg(feature = "lead-blank-2")]
-const LEAD_BLANK_DELAY: usize = 2;
-#[cfg(feature = "lead-blank-4")]
-const LEAD_BLANK_DELAY: usize = 4;
-#[cfg(feature = "lead-blank-8")]
-const LEAD_BLANK_DELAY: usize = 8;
-#[cfg(feature = "lead-blank-16")]
-const LEAD_BLANK_DELAY: usize = 16;
-
-#[cfg(not(any(
-    feature = "lead-blank-1",
-    feature = "lead-blank-2",
-    feature = "lead-blank-4",
-    feature = "lead-blank-8",
-    feature = "lead-blank-16"
-)))]
-const LEAD_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "trail-blank-1")]
-const TRAIL_BLANK_DELAY: usize = 1;
-#[cfg(feature = "trail-blank-2")]
-const TRAIL_BLANK_DELAY: usize = 2;
-#[cfg(feature = "trail-blank-4")]
-const TRAIL_BLANK_DELAY: usize = 4;
-#[cfg(feature = "trail-blank-8")]
-const TRAIL_BLANK_DELAY: usize = 8;
-#[cfg(feature = "trail-blank-16")]
-const TRAIL_BLANK_DELAY: usize = 16;
-
-#[cfg(not(any(
-    feature = "trail-blank-1",
-    feature = "trail-blank-2",
-    feature = "trail-blank-4",
-    feature = "trail-blank-8",
-    feature = "trail-blank-16"
-)))]
-const TRAIL_BLANK_DELAY: usize = 0;
-
-#[cfg(feature = "inter-row-blank-4")]
-const INTER_ROW_BLANK: usize = 4;
-#[cfg(feature = "inter-row-blank-8")]
-const INTER_ROW_BLANK: usize = 8;
-#[cfg(feature = "inter-row-blank-16")]
-const INTER_ROW_BLANK: usize = 16;
-#[cfg(feature = "inter-row-blank-32")]
-const INTER_ROW_BLANK: usize = 32;
-#[cfg(not(any(
-    feature = "inter-row-blank-4",
-    feature = "inter-row-blank-8",
-    feature = "inter-row-blank-16",
-    feature = "inter-row-blank-32"
-)))]
-const INTER_ROW_BLANK: usize = 0;
 
 #[cfg(not(feature = "invert-oe"))]
 const OE_ACTIVE: u8 = 0b1000_0000;
@@ -498,10 +451,11 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
 
     #[inline]
     pub const fn format(&mut self) {
-        let mut addr = 0;
-        while addr < NROWS {
-            self.rows[addr].format(addr as u8);
-            addr += 1;
+        let mut slot = 0;
+        while slot < NROWS {
+            let (_, addr) = slot_addresses::<NROWS>(slot);
+            self.rows[slot].format(addr);
+            slot += 1;
         }
     }
 
@@ -515,7 +469,8 @@ impl<const ROWS: usize, const COLS: usize, const NROWS: usize> Frame<ROWS, COLS,
 
     #[inline]
     pub fn set_pixel(&mut self, y: usize, x: usize, red: bool, green: bool, blue: bool) {
-        let row = &mut self.rows[if y < NROWS { y } else { y - NROWS }];
+        let row_idx = map_row_index::<NROWS>(if y < NROWS { y } else { y - NROWS });
+        let row = &mut self.rows[row_idx];
         if y < NROWS {
             row.set_color0(x, red, green, blue);
         } else {
@@ -596,6 +551,13 @@ impl<
 {
     /// Create a new framebuffer with the given number of frames.
     /// The framebuffer is automatically formatted and ready to use.
+    ///
+    /// # Panics
+    ///
+    /// With the `esp32-ordering` feature, panics if `COLS` is not
+    /// divisible by 4 (the ESP32's byte-order rearrangement requires
+    /// column counts that are multiples of 4).
+    ///
     /// # Example
     /// ```rust,no_run
     /// use hub75_framebuffer::{latched::DmaFrameBuffer,compute_rows,compute_frame_count};
@@ -611,6 +573,11 @@ impl<
     /// ```
     #[must_use]
     pub const fn new() -> Self {
+        #[cfg(feature = "esp32-ordering")]
+        assert!(
+            COLS % 4 == 0,
+            "esp32-ordering feature requires COLS to be divisible by 4"
+        );
         let mut fb = Self {
             frames: [Frame::new(); FRAME_COUNT],
         };
@@ -621,6 +588,7 @@ impl<
     /// Returns the number of BCM chunks in this framebuffer (always 1 for
     /// single-plane framebuffers — the entire buffer is one contiguous chunk).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_count() -> usize {
         1
     }
@@ -628,6 +596,7 @@ impl<
     /// Returns the byte size of one BCM chunk (for single-plane framebuffers
     /// this equals the total DMA buffer size, since BCM weighting is baked in).
     #[must_use]
+    #[deprecated(since = "0.11.0", note = "use BCM_SEQUENCE instead")]
     pub const fn bcm_chunk_bytes() -> usize {
         core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>()
     }
@@ -789,12 +758,20 @@ impl<
         I: IntoIterator<Item = embedded_graphics::Pixel<Self::Color>>,
     {
         for pixel in pixels {
+            if pixel.0.x < 0 || pixel.0.y < 0 {
+                continue;
+            }
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -812,6 +789,11 @@ unsafe impl<
     }
 }
 
+///
+/// # Deprecated
+///
+/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
+/// pointers instead of `ReadBuffer` for DMA transfers.
 unsafe impl<
         const ROWS: usize,
         const COLS: usize,
@@ -884,19 +866,11 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > super::FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > embedded_graphics::prelude::OriginDimensions
+    for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    type Word = u8;
-
-    fn plane_count(&self) -> usize {
-        1
-    }
-
-    fn plane_ptr_len(&self, plane_idx: usize) -> (*const u8, usize) {
-        assert!(plane_idx == 0, "latched DmaFrameBuffer has only 1 plane");
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
+    fn size(&self) -> embedded_graphics::prelude::Size {
+        embedded_graphics::prelude::Size::new(COLS as u32, ROWS as u32)
     }
 }
 
@@ -906,11 +880,26 @@ impl<
         const NROWS: usize,
         const BITS: u8,
         const FRAME_COUNT: usize,
-    > embedded_graphics::prelude::OriginDimensions
-    for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
+    > FrameBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
 {
-    fn size(&self) -> embedded_graphics::prelude::Size {
-        embedded_graphics::prelude::Size::new(COLS as u32, ROWS as u32)
+    type Word = u8;
+
+    const BCM_SEQUENCE: [BcmLenReps; BCM_SEQUENCE_CAPACITY] = {
+        let mut seq = [BcmLenReps::ZERO; BCM_SEQUENCE_CAPACITY];
+        seq[0] = BcmLenReps {
+            len: core::mem::size_of::<[Frame<ROWS, COLS, NROWS>; FRAME_COUNT]>(),
+            reps: 1,
+        };
+        seq
+    };
+
+    const BCM_SEQUENCE_LEN: usize = 1;
+
+    const BCM_SEQUENCE_COUNT: usize = 1;
+
+    fn bcm_segment_ptr(&self, index: usize) -> *const u8 {
+        assert!(index == 0, "threshold DmaFrameBuffer has only 1 segment");
+        (&raw const self.frames).cast::<u8>()
     }
 }
 
@@ -932,19 +921,28 @@ mod tests {
     use std::vec;
 
     use super::*;
-    use crate::{FrameBuffer, WordSize};
     use embedded_graphics::pixelcolor::RgbColor;
     use embedded_graphics::prelude::*;
     use embedded_graphics::primitives::{Circle, PrimitiveStyle, Rectangle};
 
     const TEST_ROWS: usize = 32;
-    const TEST_COLS: usize = 64;
+    const TEST_COLS: usize = if LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 2 > 64 {
+        128
+    } else {
+        64
+    };
     const TEST_NROWS: usize = TEST_ROWS / 2;
     const TEST_BITS: u8 = 3;
     const TEST_FRAME_COUNT: usize = (1 << TEST_BITS) - 1; // 7 frames for 3-bit depth
 
     type TestFrameBuffer =
         DmaFrameBuffer<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_BITS, TEST_FRAME_COUNT>;
+
+    // Helper function to get the physical memory slot for a logical row-pair
+    // index (reversed when the `reverse-row-order` feature is enabled)
+    fn get_mapped_row(row_idx: usize) -> usize {
+        map_row_index::<TEST_NROWS>(row_idx)
+    }
 
     #[test]
     fn test_address_construction() {
@@ -1141,10 +1139,11 @@ mod tests {
 
         frame.format();
 
-        for (addr, row) in frame.rows.iter().enumerate() {
+        for (slot, row) in frame.rows.iter().enumerate() {
             // Check that each row was formatted with its address
+            let (_, addr) = slot_addresses::<TEST_NROWS>(slot);
             for address in &row.address {
-                assert_eq!(address.addr() as usize, addr);
+                assert_eq!(address.addr(), addr);
             }
         }
     }
@@ -1157,17 +1156,59 @@ mod tests {
         frame.set_pixel(5, 10, true, false, true);
 
         let mapped_col_10 = map_index(10);
-        assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            true
+        );
 
         // Test setting pixel in lower half (y >= NROWS)
         frame.set_pixel(TEST_NROWS + 5, 15, false, true, false);
 
         let mapped_col_15 = map_index(15);
-        assert_eq!(frame.rows[5].data[mapped_col_15].red2(), false);
-        assert_eq!(frame.rows[5].data[mapped_col_15].grn2(), true);
-        assert_eq!(frame.rows[5].data[mapped_col_15].blu2(), false);
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].red2(),
+            false
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].grn2(),
+            true
+        );
+        assert_eq!(
+            frame.rows[get_mapped_row(5)].data[mapped_col_15].blu2(),
+            false
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "reverse-row-order")]
+    fn test_reverse_row_order() {
+        let mut fb = TestFrameBuffer::new();
+
+        // Slot 0 is streamed first and renders the last panel row; the final
+        // slot renders panel row 0. Every address byte carries the slot's own
+        // row address.
+        let first = &fb.frames[0].rows[0];
+        for address in &first.address {
+            assert_eq!(address.addr(), (TEST_NROWS - 1) as u8);
+        }
+        let last = &fb.frames[0].rows[TEST_NROWS - 1];
+        for address in &last.address {
+            assert_eq!(address.addr(), 0);
+        }
+
+        // Logical row 0 maps to the last memory slot.
+        fb.set_pixel(Point::new(3, 0), Color::RED);
+        let col3 = map_index(3);
+        assert!(fb.frames[0].rows[TEST_NROWS - 1].data[col3].red1());
+        assert!(!fb.frames[0].rows[0].data[col3].red1());
     }
 
     #[test]
@@ -1222,6 +1263,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_bcm_chunk_info() {
         let expected_size =
             core::mem::size_of::<[Frame<TEST_ROWS, TEST_COLS, TEST_NROWS>; TEST_FRAME_COUNT]>();
@@ -1238,9 +1280,10 @@ mod tests {
 
         // After formatting, all frames should be formatted
         for frame in &fb.frames {
-            for (addr, row) in frame.rows.iter().enumerate() {
+            for (slot, row) in frame.rows.iter().enumerate() {
+                let (_, addr) = slot_addresses::<TEST_NROWS>(slot);
                 for address in &row.address {
-                    assert_eq!(address.addr() as usize, addr);
+                    assert_eq!(address.addr(), addr);
                 }
             }
         }
@@ -1272,9 +1315,18 @@ mod tests {
         for frame in &fb.frames {
             // Check upper half pixel
             let mapped_col_10 = map_index(10);
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), false);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), false);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                false
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                false
+            );
         }
     }
 
@@ -1296,7 +1348,10 @@ mod tests {
             let should_be_active = test_brightness >= frame_threshold;
 
             let mapped_col_0 = map_index(0);
-            assert_eq!(frame.rows[0].data[mapped_col_0].red1(), should_be_active);
+            assert_eq!(
+                frame.rows[get_mapped_row(0)].data[mapped_col_0].red1(),
+                should_be_active
+            );
         }
     }
 
@@ -1362,60 +1417,60 @@ mod tests {
         // Red pixel at (5, 2) - should be red in first frame
         let col_idx = map_index(5);
         assert_eq!(
-            first_frame.rows[2].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].red1(),
             Color::RED.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[2].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].grn1(),
             Color::RED.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[2].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(2)].data[col_idx].blu1(),
             Color::RED.b() >= first_frame_threshold
         );
 
         // Green pixel at (10, 5) - should be green in first frame
         let col_idx = map_index(10);
         assert_eq!(
-            first_frame.rows[5].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].red1(),
             Color::GREEN.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[5].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].grn1(),
             Color::GREEN.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[5].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(5)].data[col_idx].blu1(),
             Color::GREEN.b() >= first_frame_threshold
         );
 
         // Blue pixel at (15, 8) - should be blue in first frame
         let col_idx = map_index(15);
         assert_eq!(
-            first_frame.rows[8].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].red1(),
             Color::BLUE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[8].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].grn1(),
             Color::BLUE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[8].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(8)].data[col_idx].blu1(),
             Color::BLUE.b() >= first_frame_threshold
         );
 
         // White pixel at (20, 10) - should be white in first frame
         let col_idx = map_index(20);
         assert_eq!(
-            first_frame.rows[10].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].red1(),
             Color::WHITE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[10].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].grn1(),
             Color::WHITE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[10].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(10)].data[col_idx].blu1(),
             Color::WHITE.b() >= first_frame_threshold
         );
 
@@ -1423,66 +1478,75 @@ mod tests {
         // Red pixel at (25, TEST_NROWS + 3) -> row 3, color1
         let col_idx = map_index(25);
         assert_eq!(
-            first_frame.rows[3].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].red2(),
             Color::RED.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[3].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].grn2(),
             Color::RED.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[3].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].blu2(),
             Color::RED.b() >= first_frame_threshold
         );
 
         // Green pixel at (30, TEST_NROWS + 7) -> row 7, color1
         let col_idx = map_index(30);
         assert_eq!(
-            first_frame.rows[7].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].red2(),
             Color::GREEN.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[7].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].grn2(),
             Color::GREEN.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[7].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(7)].data[col_idx].blu2(),
             Color::GREEN.b() >= first_frame_threshold
         );
 
         // Blue pixel at (35, TEST_NROWS + 12) -> row 12, color1
         let col_idx = map_index(35);
         assert_eq!(
-            first_frame.rows[12].data[col_idx].red2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].red2(),
             Color::BLUE.r() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[12].data[col_idx].grn2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].grn2(),
             Color::BLUE.g() >= first_frame_threshold
         );
         assert_eq!(
-            first_frame.rows[12].data[col_idx].blu2(),
+            first_frame.rows[get_mapped_row(12)].data[col_idx].blu2(),
             Color::BLUE.b() >= first_frame_threshold
         );
 
         // Test black pixel - should not be visible in any frame
         let col_idx = map_index(40);
-        assert_eq!(first_frame.rows[1].data[col_idx].red1(), false);
-        assert_eq!(first_frame.rows[1].data[col_idx].grn1(), false);
-        assert_eq!(first_frame.rows[1].data[col_idx].blu1(), false);
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].red1(),
+            false
+        );
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].grn1(),
+            false
+        );
+        assert_eq!(
+            first_frame.rows[get_mapped_row(1)].data[col_idx].blu1(),
+            false
+        );
 
         // Test low brightness pixel (16, 16, 16) - should not be visible in first frame (threshold 32)
         let col_idx = map_index(45);
         assert_eq!(
-            first_frame.rows[3].data[col_idx].red1(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].red1(),
             16 >= first_frame_threshold
         ); // false
         assert_eq!(
-            first_frame.rows[3].data[col_idx].grn1(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].grn1(),
             16 >= first_frame_threshold
         ); // false
         assert_eq!(
-            first_frame.rows[3].data[col_idx].blu1(),
+            first_frame.rows[get_mapped_row(3)].data[col_idx].blu1(),
             16 >= first_frame_threshold
         ); // false
     }
@@ -1523,16 +1587,6 @@ mod tests {
             assert!(!ptr.is_null());
             assert_eq!(len, core::mem::size_of_val(&fb.frames));
         }
-    }
-
-    #[test]
-    fn test_framebuffer_trait() {
-        let fb = TestFrameBuffer::new();
-        assert_eq!(fb.get_word_size(), WordSize::Eight);
-
-        let mut fb = TestFrameBuffer::new();
-        let fb_ref = &mut fb;
-        assert_eq!(fb_ref.get_word_size(), WordSize::Eight);
     }
 
     #[test]
@@ -1613,17 +1667,35 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = map_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
 
         // Now set it to black - with skip-black-pixels enabled, this should be ignored
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should still be red (black write was skipped)
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
     }
 
     #[test]
@@ -1636,17 +1708,35 @@ mod tests {
 
         // Verify it's red in the first frame
         let mapped_col_10 = map_index(10);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
 
         // Now set it to black - with skip-black-pixels disabled, this should overwrite
         fb.set_pixel_internal(10, 5, Color::BLACK);
 
         // The pixel should now be black (all bits false)
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
     }
 
     #[test]
@@ -1661,9 +1751,18 @@ mod tests {
         // Verify white pixel is lit in all frames (255 >= all thresholds)
         for frame in fb.frames.iter() {
             // White (255) should be active in all frames since it's >= all thresholds
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), true);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), true);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                true
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                true
+            );
         }
 
         // Now overwrite with 50% white (128, 128, 128)
@@ -1679,23 +1778,32 @@ mod tests {
             let frame_threshold = (frame_idx as u8 + 1) * brightness_step;
             let should_be_active = 128 >= frame_threshold;
 
-            assert_eq!(frame.rows[5].data[mapped_col_10].red1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].grn1(), should_be_active);
-            assert_eq!(frame.rows[5].data[mapped_col_10].blu1(), should_be_active);
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+                should_be_active
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+                should_be_active
+            );
+            assert_eq!(
+                frame.rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+                should_be_active
+            );
         }
 
         // Specifically verify the expected pattern for 3-bit depth
         // Frames 0-3 should be active (thresholds 32, 64, 96, 128)
         for frame_idx in 0..4 {
             assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.frames[frame_idx].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
                 true
             );
         }
         // Frames 4-6 should be inactive (thresholds 160, 192, 224)
         for frame_idx in 4..TEST_FRAME_COUNT {
             assert_eq!(
-                fb.frames[frame_idx].rows[5].data[mapped_col_10].red1(),
+                fb.frames[frame_idx].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
                 false
             );
         }
@@ -1707,9 +1815,10 @@ mod tests {
 
         // After new(), all frames should be formatted
         for frame in &fb.frames {
-            for (addr, row) in frame.rows.iter().enumerate() {
+            for (slot, row) in frame.rows.iter().enumerate() {
+                let (_, addr) = slot_addresses::<TEST_NROWS>(slot);
                 for address in &row.address {
-                    assert_eq!(address.addr() as usize, addr);
+                    assert_eq!(address.addr(), addr);
                 }
             }
         }
@@ -1727,29 +1836,54 @@ mod tests {
         let mapped_col_20 = map_index(20);
 
         // Verify pixels are set
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), true);
-        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].grn1(), true);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            true
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(10)].data[mapped_col_20].grn1(),
+            true
+        );
 
         // erase
         fb.erase();
 
         // Verify pixels are cleared but control bits are preserved
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].red1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].grn1(), false);
-        assert_eq!(fb.frames[0].rows[5].data[mapped_col_10].blu1(), false);
-        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].red1(), false);
-        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].grn1(), false);
-        assert_eq!(fb.frames[0].rows[10].data[mapped_col_20].blu1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mapped_col_10].blu1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(10)].data[mapped_col_20].red1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(10)].data[mapped_col_20].grn1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(10)].data[mapped_col_20].blu1(),
+            false
+        );
 
         // Verify control bits are still correct
         let oe_active = !cfg!(feature = "invert-oe");
         let active_count = TEST_COLS.saturating_sub(LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 1);
         let blank_count = TEST_COLS - active_count;
         for frame in &fb.frames {
-            for (addr, row) in frame.rows.iter().enumerate() {
+            for (slot, row) in frame.rows.iter().enumerate() {
                 // Check address words
+                let (_, addr) = slot_addresses::<TEST_NROWS>(slot);
                 for address in &row.address {
-                    assert_eq!(address.addr() as usize, addr);
+                    assert_eq!(address.addr(), addr);
                 }
                 let oe_blank_count = row
                     .data
@@ -1949,9 +2083,9 @@ mod tests {
                 // Fetch the entry from frame 0 directly.
                 let frame0 = &fb.frames[0];
                 let e = if gy < TEST_NROWS {
-                    &frame0.rows[gy].data[map_index(gx)]
+                    &frame0.rows[get_mapped_row(gy)].data[map_index(gx)]
                 } else {
-                    &frame0.rows[gy - TEST_NROWS].data[map_index(gx)]
+                    &frame0.rows[get_mapped_row(gy - TEST_NROWS)].data[map_index(gx)]
                 };
 
                 let (r, g, b) = if gy >= TEST_NROWS {
@@ -1997,14 +2131,20 @@ mod tests {
         // Verify colors are cleared but control bits/timing remain intact on frame 0
         let mc10 = map_index(10);
         let mc20 = map_index(20);
-        assert_eq!(fb.frames[0].rows[5].data[mc10].red1(), false);
-        assert_eq!(fb.frames[0].rows[10].data[mc20].grn1(), false);
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(5)].data[mc10].red1(),
+            false
+        );
+        assert_eq!(
+            fb.frames[0].rows[get_mapped_row(10)].data[mc20].grn1(),
+            false
+        );
 
         // Data entries should still have the same OE pattern and latch should remain false for all
         let oe_active = !cfg!(feature = "invert-oe");
         let active_count = TEST_COLS.saturating_sub(LEAD_BLANK_DELAY + TRAIL_BLANK_DELAY + 1);
         let blank_count = TEST_COLS - active_count;
-        let row0 = &fb.frames[0].rows[0];
+        let row0 = &fb.frames[0].rows[get_mapped_row(0)];
         let oe_blank_count = row0
             .data
             .iter()
@@ -2032,10 +2172,10 @@ mod tests {
 
         // For BITS=3, BLUE should light blue channel in early frames
         let idx = map_index(8);
-        assert_eq!(fb.frames[0].rows[3].data[idx].blu1(), true);
+        assert_eq!(fb.frames[0].rows[get_mapped_row(3)].data[idx].blu1(), true);
         // Red/Green should be off for BLUE at frame 0
-        assert_eq!(fb.frames[0].rows[3].data[idx].red1(), false);
-        assert_eq!(fb.frames[0].rows[3].data[idx].grn1(), false);
+        assert_eq!(fb.frames[0].rows[get_mapped_row(3)].data[idx].red1(), false);
+        assert_eq!(fb.frames[0].rows[get_mapped_row(3)].data[idx].grn1(), false);
     }
 
     #[test]
@@ -2102,6 +2242,53 @@ mod tests {
                     "re-formatted vs static mismatch at frame {fi}, row {ri}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn bcm_segment_count_is_one() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        assert_eq!(fb.bcm_segment_count(), 1);
+    }
+
+    #[test]
+    fn bcm_segment_covers_entire_buffer() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        let seg = fb.bcm_segment(0);
+        let expected_ptr = (&raw const fb.frames).cast::<u8>();
+        let expected_len = core::mem::size_of_val(&fb.frames);
+        assert_eq!(seg.ptr, expected_ptr);
+        assert_eq!(seg.len, expected_len);
+        assert_eq!(seg.reps, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn bcm_segment_panics_for_invalid_index() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        let _ = fb.bcm_segment(1);
+    }
+
+    #[test]
+    fn bcm_sequence_matches_runtime_segments() {
+        use crate::FrameBuffer;
+        let fb = TestFrameBuffer::new();
+        assert_eq!(
+            TestFrameBuffer::BCM_SEGMENT_COUNT,
+            TestFrameBuffer::BCM_SEQUENCE_LEN * TestFrameBuffer::BCM_SEQUENCE_COUNT
+        );
+        assert_eq!(fb.bcm_segment_count(), TestFrameBuffer::BCM_SEGMENT_COUNT);
+        for i in 0..TestFrameBuffer::BCM_SEGMENT_COUNT {
+            let entry = TestFrameBuffer::BCM_SEQUENCE[i % TestFrameBuffer::BCM_SEQUENCE_LEN];
+            let seg = fb.bcm_segment(i);
+            assert_eq!((seg.len, seg.reps), (entry.len, entry.reps), "segment {i}");
+            assert!(!seg.ptr.is_null(), "segment {i} has null pointer");
+        }
+        for entry in &TestFrameBuffer::BCM_SEQUENCE[TestFrameBuffer::BCM_SEQUENCE_LEN..] {
+            assert_eq!(*entry, crate::BcmLenReps::ZERO, "padding must be zero");
         }
     }
 }
