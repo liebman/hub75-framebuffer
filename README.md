@@ -86,7 +86,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = "0.11.0"
+hub75-framebuffer = "0.12.0"
 ```
 
 ### Choose your parameters
@@ -203,7 +203,7 @@ ESP32 variants (S2, S3, C3, etc.) do **not** need this feature.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.11.0", features = ["esp32-ordering"] }
+hub75-framebuffer = { version = "0.12.0", features = ["esp32-ordering"] }
 ```
 
 ### `skip-black-pixels`
@@ -225,7 +225,7 @@ variants) and combines freely with the other features.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.11.0", features = ["reverse-row-order"] }
+hub75-framebuffer = { version = "0.12.0", features = ["reverse-row-order"] }
 ```
 
 ### `lead-blank-1/2/4/8/16/32` / `trail-blank-1/2/4/8/16/32`
@@ -259,7 +259,7 @@ you observe row-transition artifacts on your particular panel hardware.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.11.0", features = ["lead-blank-4", "trail-blank-2"] }
+hub75-framebuffer = { version = "0.12.0", features = ["lead-blank-4", "trail-blank-2"] }
 ```
 
 **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
@@ -289,7 +289,7 @@ end of each row, between that row's latch and the next row's first pixel.
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.11.0", features = ["inter-row-blank-8"] }
+hub75-framebuffer = { version = "0.12.0", features = ["inter-row-blank-8"] }
 ```
 
 **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
@@ -325,7 +325,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hub75-framebuffer = { version = "0.11.0", 
+hub75-framebuffer = { version = "0.12.0", 
                       features = ["esp32-ordering", "skip-black-pixels"] }
 ```
 

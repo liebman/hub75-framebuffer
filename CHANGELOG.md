@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+## [0.12.0] - 2026-08-26
+
 ### ⚠️ Breaking
 
 * The `FrameBuffer` trait's plane-oriented API was replaced by a BCM
@@ -240,7 +242,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * initial version
 
 <!-- next-url -->
-[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/liebman/hub75-framebuffer/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/liebman/hub75-framebuffer/compare/v0.9.1...v0.9.2
