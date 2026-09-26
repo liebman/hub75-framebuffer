@@ -169,6 +169,29 @@
 //! hub75-framebuffer = { version = "0.12.0", features = ["esp32-ordering"] }
 //! ```
 //!
+//! ### `interstate75` Feature (Pimoroni Interstate 75 / 75 W only)
+//! Selects the 16-bit pin layout of the Pimoroni Interstate 75 and
+//! Interstate 75 W (`RP2040` / `RP2350`). The DMA word is pre-aligned to the
+//! board's contiguous GPIO mapping (`GPIO0..GPIO13`) so a PIO `out pins, 16`
+//! stream can clock out the panel with no run-time bit shuffling:
+//!
+//! ```text
+//! bit  13  12   11    10..6      5..3        2..0
+//!      OE  LAT  CLK*  E D C B A  B1 G1 R1   B0 G0 R0
+//! ```
+//!
+//! \* the clock bit is reserved; the PIO's side-set drives `CLK`, so the
+//! framebuffer always leaves that bit at 0.
+//!
+//! Applies to the 16-bit [`plain`] and [`bitplane::plain`] framebuffers only;
+//! the 8-bit `latched` framebuffers are unaffected. Mutually exclusive with
+//! `esp32-ordering`.
+//!
+//! ```toml
+//! [dependencies]
+//! hub75-framebuffer = { version = "0.12.0", features = ["interstate75"] }
+//! ```
+//!
 //! ### `tail-closes-latch` Feature (plain framebuffers only)
 //! Appends a single extra "tail" word at the end of the DMA buffer that drives the
 //! LATCH signal LOW (de-asserted) on the final clock edge. Without this feature the
@@ -292,6 +315,9 @@
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::Point;
+
+/// Compile-time HUB75-signal → DMA-word bit mapping (board-selected).
+mod pinmap;
 
 pub mod bitplane;
 pub mod latched;
@@ -511,6 +537,15 @@ const _: () = assert!(
     ))
 ))]
 compile_error!("enable an inter-row-blank-* feature (4/8/16/32), not `inter-row-blank` directly");
+
+// `interstate75` selects an RP2xxx/PIO pin layout; `esp32-ordering` compensates
+// for the original ESP32's I²S byte order. The two target different boards and
+// cannot both be correct.
+#[cfg(all(feature = "interstate75", feature = "esp32-ordering"))]
+compile_error!(
+    "`interstate75` and `esp32-ordering` are mutually exclusive: they select \
+     different board pin/byte layouts"
+);
 
 #[cfg(feature = "inter-row-blank-4")]
 pub(crate) const INTER_ROW_BLANK: usize = 4;

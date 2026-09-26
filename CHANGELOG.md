@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+* Minimum supported Rust version is now **1.95** (previously 1.86). The
+  board-specific HUB75 bit layout in `src/pinmap.rs` is selected with the
+  newly stabilised `core::cfg_select!` macro.
+
+### Added
+
+* New `interstate75` feature selecting the Pimoroni Interstate 75 / 75 W
+  (RP2040/RP2350) 16-bit pin layout for the `plain` and `bitplane::plain`
+  framebuffers: `R0 G0 B0 R1 G1 B1` on bits 0-5, row address `A..E` on bits
+  6-10, the clock slot reserved on bit 11, `LAT` on bit 12 and `OE` on bit 13.
+  This matches the board's contiguous GPIO mapping (`GPIO0..GPIO13`) so the
+  PIO can stream the buffer unmodified. Mutually exclusive with
+  `esp32-ordering`. No effect on the 8-bit `latched` framebuffers.
+
 ## [0.12.0] - 2026-08-26
 
 ### ⚠️ Breaking

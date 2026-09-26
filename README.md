@@ -206,6 +206,30 @@ ESP32 variants (S2, S3, C3, etc.) do **not** need this feature.
 hub75-framebuffer = { version = "0.12.0", features = ["esp32-ordering"] }
 ```
 
+### `interstate75` (Pimoroni Interstate 75 / 75 W)
+
+Selects the 16-bit pin layout used by the Pimoroni Interstate 75 and
+Interstate 75 W (RP2040 / RP2350). The DMA word is pre-aligned to the board's
+contiguous GPIO mapping, so a PIO `out pins, 16` stream can clock out the whole
+panel with a two-instruction program and no run-time bit shuffling:
+
+| Bit   | 0  | 1  | 2  | 3  | 4  | 5  | 6-10     | 11     | 12  | 13 |
+|-------|----|----|----|----|----|----|----------|--------|-----|----|
+| GPIO  | 0  | 1  | 2  | 3  | 4  | 5  | 6-10     | 11     | 12  | 13 |
+| Signal| R0 | G0 | B0 | R1 | G1 | B1 | A B C D E| CLK\*  | LAT | OE |
+
+GPIO11 — labelled `CLK` here — is the reserved clock slot: the PIO drives the
+clock pin from its `side_set`, so the framebuffer always leaves bit 11 at 0.
+
+```toml
+[dependencies]
+hub75-framebuffer = { version = "0.12.0", features = ["interstate75"] }
+```
+
+Applies to the 16-bit `plain` and `bitplane::plain` framebuffers only. The
+8-bit `latched` framebuffers (external-latch wiring) are unaffected. Mutually
+exclusive with `esp32-ordering`.
+
 ### `skip-black-pixels`
 
 Skip drawing black pixels for performance boost in UI applications. When
