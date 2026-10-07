@@ -29,7 +29,7 @@
 //! 14 ─ B1       Blue  – lower half       14 ─ (spare)
 //! 13 ─ G1       Green – lower half       13 ─ OE    Output-Enable / Blank
 //! 12 ─ R1       Red   – lower half       12 ─ LAT   Latch / STB
-//! 11 ─ B0       Blue  – upper half       11 ─ CLK   (reserved; PIO side-set)
+//! 11 ─ B0       Blue  – upper half       11 ─ (spare)
 //! 10 ─ G0       Green – upper half       10 ─ E     Row address
 //!  9 ─ R0       Red   – upper half        9 ─ D     Row address
 //!  8 ─ OE       Output-Enable / Blank      8 ─ C     Row address
@@ -79,6 +79,7 @@ pub use frame::DmaFrameBuffer;
 
 #[cfg(feature = "tail-closes-latch")]
 pub(crate) use crate::pinmap::ADDR_MASK;
+pub(crate) use crate::pinmap::PINMAP;
 pub(crate) use crate::pinmap::{
     ADDR_SHIFT, COLOR0_MASK, COLOR0_SHIFT, COLOR1_MASK, COLOR1_SHIFT, COLOR_MASK, LATCH_BIT, OE_BIT,
 };
@@ -142,45 +143,27 @@ pub(crate) const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; C
 // Entry — the 16-bit word that rides on the HUB75 bus
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "interstate75"))]
+// The bit layout is selected per board by `crate::pinmap`; this single
+// `bitfield!` definition reads the positions straight from `PINMAP` so the
+// accessors can never drift out of sync with the DMA templates. Note the
+// `red1/grn1/blu1` accessors are the *upper-half* triplet (`PINMAP.red0`...),
+// and `red2/grn2/blu2` the lower half.
 bitfield! {
     #[derive(Clone, Copy, Default, PartialEq)]
     #[repr(transparent)]
     pub(crate) struct Entry(u16);
-    pub(crate) dummy2, set_dummy2: 15;
-    pub(crate) blu2, set_blu2: 14;
-    pub(crate) grn2, set_grn2: 13;
-    pub(crate) red2, set_red2: 12;
-    pub(crate) blu1, set_blu1: 11;
-    pub(crate) grn1, set_grn1: 10;
-    pub(crate) red1, set_red1: 9;
-    pub(crate) output_enable, set_output_enable: 8;
-    pub(crate) dummy1, set_dummy1: 7;
-    pub(crate) dummy0, set_dummy0: 6;
-    pub(crate) latch, set_latch: 5;
-    pub(crate) addr, set_addr: 4, 0;
-}
-
-// Pimoroni Interstate 75 / 75 W layout: `R0 G0 B0 R1 G1 B1 A..E CLK LAT OE`
-// on bits 0..13. `dummy0` is the reserved `CLK` slot (bit 11) and is always
-// left at 0 — the PIO's side-set drives the real clock pin.
-#[cfg(feature = "interstate75")]
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq)]
-    #[repr(transparent)]
-    pub(crate) struct Entry(u16);
-    pub(crate) dummy2, set_dummy2: 15;
-    pub(crate) dummy1, set_dummy1: 14;
-    pub(crate) output_enable, set_output_enable: 13;
-    pub(crate) latch, set_latch: 12;
-    pub(crate) dummy0, set_dummy0: 11;
-    pub(crate) addr, set_addr: 10, 6;
-    pub(crate) blu2, set_blu2: 5;
-    pub(crate) grn2, set_grn2: 4;
-    pub(crate) red2, set_red2: 3;
-    pub(crate) blu1, set_blu1: 2;
-    pub(crate) grn1, set_grn1: 1;
-    pub(crate) red1, set_red1: 0;
+    pub(crate) dummy2, set_dummy2: PINMAP.spare[2];
+    pub(crate) blu2, set_blu2: PINMAP.blu1;
+    pub(crate) grn2, set_grn2: PINMAP.grn1;
+    pub(crate) red2, set_red2: PINMAP.red1;
+    pub(crate) blu1, set_blu1: PINMAP.blu0;
+    pub(crate) grn1, set_grn1: PINMAP.grn0;
+    pub(crate) red1, set_red1: PINMAP.red0;
+    pub(crate) output_enable, set_output_enable: PINMAP.oe;
+    pub(crate) dummy1, set_dummy1: PINMAP.spare[1];
+    pub(crate) dummy0, set_dummy0: PINMAP.spare[0];
+    pub(crate) latch, set_latch: PINMAP.latch;
+    pub(crate) addr, set_addr: PINMAP.addr_msb(), PINMAP.addr_lsb;
 }
 
 impl core::fmt::Debug for Entry {

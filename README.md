@@ -216,10 +216,9 @@ panel with a two-instruction program and no run-time bit shuffling:
 | Bit   | 0  | 1  | 2  | 3  | 4  | 5  | 6-10     | 11     | 12  | 13 |
 |-------|----|----|----|----|----|----|----------|--------|-----|----|
 | GPIO  | 0  | 1  | 2  | 3  | 4  | 5  | 6-10     | 11     | 12  | 13 |
-| Signal| R0 | G0 | B0 | R1 | G1 | B1 | A B C D E| CLK\*  | LAT | OE |
+| Signal| R0 | G0 | B0 | R1 | G1 | B1 | A B C D E| (spare)| LAT | OE |
 
-GPIO11 — labelled `CLK` here — is the reserved clock slot: the PIO drives the
-clock pin from its `side_set`, so the framebuffer always leaves bit 11 at 0.
+Bit 11 is unused by this crate and always left at 0.
 
 ```toml
 [dependencies]

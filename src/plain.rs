@@ -96,7 +96,7 @@
 //! 14 ─ B2       Blue  – lower half       14 ─ (spare)
 //! 13 ─ G2       Green – lower half       13 ─ OE    Output-Enable / Blank
 //! 12 ─ R2       Red   – lower half       12 ─ LAT   Latch / STB
-//! 11 ─ B1       Blue  – upper half       11 ─ CLK   (reserved; PIO side-set)
+//! 11 ─ B1       Blue  – upper half       11 ─ Dummy0 (spare)
 //! 10 ─ G1       Green – upper half       10 ─ E     Row address
 //!  9 ─ R1       Red   – upper half        9 ─ D     Row address
 //!  8 ─ OE       Output-Enable / Blank      8 ─ C     Row address
@@ -149,13 +149,13 @@ use crate::{
     MutableFrameBuffer, BCM_SEQUENCE_CAPACITY,
 };
 use bitfield::bitfield;
-use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 
 use super::Color;
 #[cfg(feature = "tail-closes-latch")]
 use crate::pinmap::ADDR_MASK;
+use crate::pinmap::PINMAP;
 use crate::pinmap::{
     ADDR_SHIFT, COLOR0_MASK, COLOR0_SHIFT, COLOR1_MASK, COLOR1_SHIFT, COLOR_MASK, LATCH_BIT, OE_BIT,
 };
@@ -201,65 +201,32 @@ const fn make_data_template<const COLS: usize>(addr: u8) -> [Entry; COLS] {
     data
 }
 
-#[cfg(not(feature = "interstate75"))]
 bitfield! {
     /// A 16-bit word representing the HUB75 control signals for a single pixel.
     ///
     /// This structure directly maps to the HUB75 connector signals:
     /// - RGB color data for two sub-pixels (color0 and color1)
     /// - Panel control signals (output enable, latch, address)
-    /// - Dummy bits for timing alignment
+    /// - Spare bits for timing alignment
     ///
-    /// The bit layout matches the HUB75 connector signals:
-    /// - Bit 15: Dummy bit 2
-    /// - Bit 14: Blue channel for color1
-    /// - Bit 13: Green channel for color1
-    /// - Bit 12: Red channel for color1
-    /// - Bit 11: Blue channel for color0
-    /// - Bit 10: Green channel for color0
-    /// - Bit 9: Red channel for color0
-    /// - Bit 8: Output enable
-    /// - Bit 7: Dummy bit 1
-    /// - Bit 6: Dummy bit 0
-    /// - Bit 5: Latch signal
-    /// - Bits 4-0: Row address
+    /// The exact bit positions are selected per board by [`crate::pinmap`] and
+    /// consumed by a single `bitfield!` definition, so the accessors can never
+    /// drift out of sync with the DMA templates.
     #[derive(Clone, Copy, Default, PartialEq)]
     #[repr(transparent)]
     struct Entry(u16);
-    dummy2, set_dummy2: 15;
-    blu2, set_blu2: 14;
-    grn2, set_grn2: 13;
-    red2, set_red2: 12;
-    blu1, set_blu1: 11;
-    grn1, set_grn1: 10;
-    red1, set_red1: 9;
-    output_enable, set_output_enable: 8;
-    dummy1, set_dummy1: 7;
-    dummy0, set_dummy0: 6;
-    latch, set_latch: 5;
-    addr, set_addr: 4, 0;
-}
-
-// Pimoroni Interstate 75 / 75 W layout: `R0 G0 B0 R1 G1 B1 A..E CLK LAT OE`
-// on bits 0..13. `dummy0` is the reserved `CLK` slot (bit 11) and is always
-// left at 0 — the PIO's side-set drives the real clock pin.
-#[cfg(feature = "interstate75")]
-bitfield! {
-    #[derive(Clone, Copy, Default, PartialEq)]
-    #[repr(transparent)]
-    struct Entry(u16);
-    dummy2, set_dummy2: 15;
-    dummy1, set_dummy1: 14;
-    output_enable, set_output_enable: 13;
-    latch, set_latch: 12;
-    dummy0, set_dummy0: 11;
-    addr, set_addr: 10, 6;
-    blu2, set_blu2: 5;
-    grn2, set_grn2: 4;
-    red2, set_red2: 3;
-    blu1, set_blu1: 2;
-    grn1, set_grn1: 1;
-    red1, set_red1: 0;
+    dummy2, set_dummy2: PINMAP.spare[2];
+    blu2, set_blu2: PINMAP.blu1;
+    grn2, set_grn2: PINMAP.grn1;
+    red2, set_red2: PINMAP.red1;
+    blu1, set_blu1: PINMAP.blu0;
+    grn1, set_grn1: PINMAP.grn0;
+    red1, set_red1: PINMAP.red0;
+    output_enable, set_output_enable: PINMAP.oe;
+    dummy1, set_dummy1: PINMAP.spare[1];
+    dummy0, set_dummy0: PINMAP.spare[0];
+    latch, set_latch: PINMAP.latch;
+    addr, set_addr: PINMAP.addr_msb(), PINMAP.addr_lsb;
 }
 
 impl core::fmt::Debug for Entry {
@@ -541,6 +508,19 @@ impl<
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// // No need to call format() - framebuffer is ready to use!
     /// ```
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array: one 16-bit word per pixel
+    /// clock per frame, for `(2^BITS)-1` frames. For a 64×64 panel at
+    /// 3-bit depth that is already tens of kilobytes, and it grows
+    /// exponentially with `BITS`. **Never bind it to a task-local `let`** —
+    /// that places the whole buffer on the task stack and overflows it.
+    ///
+    /// The framebuffer is mutable, so give it a `'static` home that hands
+    /// out `&'static mut` **without** `unsafe` — `static mut` is not an
+    /// option. Use `static_cell::StaticCell`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         assert!(BITS <= 8);
@@ -768,50 +748,6 @@ impl<
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
-    }
-}
-
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    type Word = u8;
-
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.data).cast::<u8>();
-        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
-        (ptr, len)
-    }
-}
-
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > ReadBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    type Word = u8;
-
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.data).cast::<u8>();
-        let len = core::mem::size_of::<FrameData<ROWS, COLS, NROWS, FRAME_COUNT>>();
-        (ptr, len)
     }
 }
 
@@ -1057,8 +993,8 @@ mod tests {
     }
 
     /// Nails the exact word layout the Interstate 75 W PIO expects:
-    /// `R0 G0 B0 R1 G1 B1 A B C D E CLK LAT OE` on bits 0..13, with the CLK
-    /// slot parked at 0. Mirrors `pimoroni-pico/drivers/hub75/hub75.hpp`.
+    /// `R0 G0 B0 R1 G1 B1 A B C D E - LAT OE` on bits 0..13, with the unused
+    /// bit 11 parked at 0. Mirrors `pimoroni-pico/drivers/hub75/hub75.hpp`.
     #[cfg(feature = "interstate75")]
     #[test]
     fn interstate75_word_layout_matches_pinout() {
@@ -1076,7 +1012,7 @@ mod tests {
 
         let expected = 0b1u16 | (0b1 << 2) | (0b1 << 4) | (0b1_0101 << 6) | (1 << 12) | OE_BLANK;
         assert_eq!(e.0, expected);
-        assert_eq!(e.0 & (1 << 11), 0, "CLK slot (bit 11) must stay 0");
+        assert_eq!(e.0 & (1 << 11), 0, "unused bit 11 must stay 0");
         assert_eq!(e.0 & (0b11 << 14), 0, "bits 14/15 must stay 0");
     }
 
@@ -1747,76 +1683,6 @@ mod tests {
                 false
             );
         }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_read_buffer_implementation() {
-        // Test owned implementation - explicitly move the framebuffer to ensure we're testing the owned impl
-        let fb = TestFrameBuffer::new();
-        let expected_size =
-            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
-
-        // Test owned ReadBuffer implementation by calling ReadBuffer::read_buffer explicitly
-        unsafe {
-            let (ptr, len) = <TestFrameBuffer as ReadBuffer>::read_buffer(&fb);
-            assert!(!ptr.is_null());
-            assert_eq!(len, expected_size);
-        }
-
-        // Test direct method call on owned value
-        unsafe {
-            let (ptr, len) = fb.read_buffer();
-            assert!(!ptr.is_null());
-            assert_eq!(len, expected_size);
-        }
-
-        // Test reference implementation
-        let fb = TestFrameBuffer::new();
-        let fb_ref = &fb;
-        unsafe {
-            let (ptr, len) = fb_ref.read_buffer();
-            assert!(!ptr.is_null());
-            assert_eq!(
-                len,
-                core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>(
-                )
-            );
-        }
-
-        // Test mutable reference implementation
-        let mut fb = TestFrameBuffer::new();
-        let fb_ref = &mut fb;
-        unsafe {
-            let (ptr, len) = fb_ref.read_buffer();
-            assert!(!ptr.is_null());
-            assert_eq!(
-                len,
-                core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>(
-                )
-            );
-        }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_read_buffer_owned_implementation() {
-        // This test specifically ensures the owned ReadBuffer implementation is tested
-        // by consuming the framebuffer and testing the pointer validity
-        fn test_owned_read_buffer(fb: TestFrameBuffer) -> (bool, usize) {
-            unsafe {
-                let (ptr, len) = fb.read_buffer();
-                (!ptr.is_null(), len)
-            }
-        }
-
-        let fb = TestFrameBuffer::new();
-        let expected_len =
-            core::mem::size_of::<FrameData<TEST_ROWS, TEST_COLS, TEST_NROWS, TEST_FRAME_COUNT>>();
-
-        let (ptr_valid, actual_len) = test_owned_read_buffer(fb);
-        assert!(ptr_valid);
-        assert_eq!(actual_len, expected_len);
     }
 
     #[test]

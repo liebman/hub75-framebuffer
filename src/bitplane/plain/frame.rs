@@ -185,6 +185,16 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// `esp32-ordering` feature, also panics if `COLS` is not even (the
     /// ESP32's byte-order swap requires an even column count). In const
     /// contexts (e.g. `static` framebuffers) this is a compile-time error.
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array (roughly
+    /// `PLANES × NROWS × (COLS + gap) × 2` bytes). A 64×64 panel at
+    /// `PLANES = 8` is tens of kilobytes, which will overflow a task stack if
+    /// bound to a local `let`. The framebuffer is mutable, so give it a
+    /// `'static` home that hands out `&'static mut` (e.g.
+    /// `static_cell::StaticCell`) — never `static mut`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");

@@ -413,6 +413,16 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// `esp32-ordering` feature, also panics if `COLS` is not even (the
     /// ESP32's byte-order swap requires an even column count). In const
     /// contexts (e.g. `static` framebuffers) this is a compile-time error.
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array (roughly
+    /// `PLANES × NROWS × (COLS + gap) × 2` bytes). A 64×64 panel at
+    /// `PLANES = 8` is tens of kilobytes, which will overflow a task stack if
+    /// bound to a local `let`. The framebuffer is mutable, so give it a
+    /// `'static` home that hands out `&'static mut` (e.g.
+    /// `static_cell::StaticCell`) — never `static mut`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
@@ -1709,8 +1719,8 @@ mod tests {
     }
 
     /// Bit-exact check of the Interstate 75 W word layout for the bitplane
-    /// framebuffer (same format as `plain`): `R0 G0 B0 R1 G1 B1 A B C D E CLK
-    /// LAT OE` on bits 0..13, with the CLK slot parked at 0.
+    /// framebuffer (same format as `plain`): `R0 G0 B0 R1 G1 B1 A B C D E -
+    /// LAT OE` on bits 0..13, with the unused bit 11 parked at 0.
     #[cfg(feature = "interstate75")]
     #[test]
     fn interstate75_entry_layout() {
@@ -1727,6 +1737,6 @@ mod tests {
 
         let expected = 0b101u16 | (0b110 << 3) | (0b1_0101 << 6) | (1 << 12) | OE_BLANK;
         assert_eq!(e.raw(), expected);
-        assert_eq!(e.raw() & (1 << 11), 0, "CLK slot (bit 11) must stay 0");
+        assert_eq!(e.raw() & (1 << 11), 0, "unused bit 11 must stay 0");
     }
 }

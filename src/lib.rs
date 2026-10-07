@@ -77,6 +77,45 @@
 //! `embedded-graphics` via the `DrawTarget` trait, and expose their BCM
 //! scan sequence through the [`FrameBuffer`] trait.
 //!
+//! ## Memory placement (⚠️ large buffers)
+//!
+//! Every framebuffer is a large inline array sized from its const generic
+//! parameters. Rough sizes:
+//!
+//! - `bitplane::plain`: `PLANES × NROWS × (COLS + gap) × 2` bytes.
+//! - `bitplane::latched`: `PLANES × NROWS × (COLS + gap)` bytes.
+//! - `plain`: `(2^BITS - 1) × NROWS × COLS × 2` bytes.
+//! - `latched`: `(2^BITS - 1) × NROWS × (COLS + 4)` bytes.
+//!
+//! For example, a 64×64 panel at 8-bit colour depth is already tens of
+//! kilobytes. **Never bind a framebuffer to a task-local `let`** — the whole
+//! buffer would be placed on that task's stack and overflow it.
+//!
+//! Framebuffers are **mutable** (drawing takes `&mut self`), so they need a
+//! `'static` home that hands out `&'static mut` **without** `unsafe`.
+//! `static mut` is *not* an option. Use `static_cell::StaticCell`, which
+//! guarantees the value is taken at most once and lives in `.bss`:
+//!
+//! ```rust,no_run
+//! use embedded_graphics::pixelcolor::RgbColor;
+//! use embedded_graphics::prelude::Point;
+//! use hub75_framebuffer::bitplane::plain::frame::DmaFrameBuffer;
+//! use hub75_framebuffer::Color;
+//! use static_cell::StaticCell;
+//!
+//! const COLS: usize = 64;
+//! const NROWS: usize = 32;
+//! const PLANES: usize = 8;
+//! type Fb = DmaFrameBuffer<NROWS, COLS, PLANES>;
+//!
+//! // `StaticCell` hands out `&'static mut` without `unsafe`; the value is
+//! // taken at most once and lives in .bss, not on the stack.
+//! static FB: StaticCell<Fb> = StaticCell::new();
+//! let fb = FB.uninit().write(Fb::new());
+//!
+//! fb.set_pixel(Point::new(0, 0), Color::RED);
+//! ```
+//!
 //! ## Driving the Panel (DMA Integration)
 //!
 //! This crate is **buffer-only**: it builds the memory image and describes
@@ -176,12 +215,11 @@
 //! stream can clock out the panel with no run-time bit shuffling:
 //!
 //! ```text
-//! bit  13  12   11    10..6      5..3        2..0
-//!      OE  LAT  CLK*  E D C B A  B1 G1 R1   B0 G0 R0
+//! bit  13  12    11     10..6      5..3        2..0
+//!      OE  LAT  (spare)  E D C B A  B1 G1 R1   B0 G0 R0
 //! ```
 //!
-//! \* the clock bit is reserved; the PIO's side-set drives `CLK`, so the
-//! framebuffer always leaves that bit at 0.
+//! Bit 11 is unused by this crate and always left at 0.
 //!
 //! Applies to the 16-bit [`plain`] and [`bitplane::plain`] framebuffers only;
 //! the 8-bit `latched` framebuffers are unaffected. Mutually exclusive with
@@ -316,8 +354,12 @@ use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::Point;
 
-/// Compile-time HUB75-signal → DMA-word bit mapping (board-selected).
-mod pinmap;
+/// Compile-time HUB75-signal → DMA-word bit mapping.
+///
+/// Exposes [`pinmap::PINMAP`] and [`pinmap::LATCHED_PINMAP`] so a driver crate
+/// can validate at compile time that its own board wiring matches the bit
+/// assignments this crate assumes.
+pub mod pinmap;
 
 pub mod bitplane;
 pub mod latched;
@@ -570,9 +612,24 @@ pub(crate) const INTER_ROW_BLANK: usize = 0;
 /// times, to produce correct BCM brightness weighting without needing to know
 /// the framebuffer's internal memory layout. See the [`FrameBuffer`]
 /// documentation for the segment/sequence terminology.
+///
+/// # Pointer validity
+///
+/// The [`ptr`](Self::ptr) field is a raw pointer borrowed from the
+/// framebuffer it was obtained from. It carries no lifetime, so the borrow
+/// checker cannot enforce the following requirements — the driver **must**:
+///
+/// - keep the source framebuffer borrowed (and **unmutated**) for the entire
+///   duration `ptr` is used by the DMA/PIO/parallel peripheral;
+/// - ensure the framebuffer is **not moved** while the transfer is live
+///   (allocate it in `static` memory, or an embassy `StaticCell`/`Mutex`);
+/// - treat `ptr` as aligned for the framebuffer's [`FrameBuffer::Word`], and
+///   read at most `len` bytes from it.
 #[derive(Debug, Clone, Copy)]
 pub struct BcmSegment {
-    /// Pointer to the segment data.
+    /// Pointer to the segment data. See the [pointer validity
+    /// contract](Self#pointer-validity) before handing this to a DMA
+    /// peripheral.
     pub ptr: *const u8,
     /// Byte length of this segment.
     pub len: usize,
@@ -717,6 +774,24 @@ pub trait FrameBuffer {
     /// [`BCM_SEQUENCE`](Self::BCM_SEQUENCE)`[index %`
     /// [`BCM_SEQUENCE_LEN`](Self::BCM_SEQUENCE_LEN)`]`.
     ///
+    /// # Pointer validity
+    ///
+    /// The returned pointer borrows from `self` but escapes as a raw pointer,
+    /// so the compiler cannot enforce how long it stays valid. The caller
+    /// **must** ensure that:
+    ///
+    /// - `self` stays borrowed and is **not mutated** for the whole time the
+    ///   pointer is used by the peripheral (hold the borrow — e.g. an embassy
+    ///   `Mutex<StaticCell<_>>` guarding a `&mut` — across the transfer);
+    /// - the framebuffer is **not moved** while the transfer is live, so it
+    ///   must live in `static`/`StaticCell` memory, never on a task stack;
+    /// - the pointer is aligned to `align_of::<Self::Word>()` before casting
+    ///   to `*const Self::Word` (a framebuffer in `static` memory satisfies
+    ///   this), and at most `len` bytes are read from it.
+    ///
+    /// [`bcm_segment`](Self::bcm_segment) wraps this together with the static
+    /// `(len, reps)` and is the preferred entry point.
+    ///
     /// # Panics
     /// Panics if `index >= BCM_SEGMENT_COUNT`.
     fn bcm_segment_ptr(&self, index: usize) -> *const u8;
@@ -725,7 +800,9 @@ pub trait FrameBuffer {
     ///
     /// The provided implementation combines
     /// [`bcm_segment_ptr`](Self::bcm_segment_ptr) with the static
-    /// `(len, reps)` from [`BCM_SEQUENCE`](Self::BCM_SEQUENCE).
+    /// `(len, reps)` from [`BCM_SEQUENCE`](Self::BCM_SEQUENCE). The returned
+    /// [`BcmSegment`] inherits the [pointer validity
+    /// contract](Self::bcm_segment_ptr) of `bcm_segment_ptr`.
     ///
     /// # Panics
     /// Panics if `index >= BCM_SEGMENT_COUNT`.

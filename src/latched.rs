@@ -183,20 +183,24 @@ use crate::{
     TRAIL_BLANK_DELAY,
 };
 use bitfield::bitfield;
-use embedded_dma::ReadBuffer;
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::pixelcolor::RgbColor;
 use embedded_graphics::prelude::Point;
 
+use crate::pinmap::{
+    LATCHED_COLOR0_MASK, LATCHED_COLOR1_MASK, LATCHED_COLOR_MASK, LATCHED_LATCH_BIT,
+    LATCHED_OE_BIT, LATCHED_PINMAP,
+};
+
 #[cfg(not(feature = "invert-oe"))]
-const OE_ACTIVE: u8 = 0b1000_0000;
+const OE_ACTIVE: u8 = LATCHED_OE_BIT;
 #[cfg(not(feature = "invert-oe"))]
 const OE_BLANK: u8 = 0;
 
 #[cfg(feature = "invert-oe")]
 const OE_ACTIVE: u8 = 0;
 #[cfg(feature = "invert-oe")]
-const OE_BLANK: u8 = 0b1000_0000;
+const OE_BLANK: u8 = LATCHED_OE_BIT;
 
 bitfield! {
     /// 8-bit word carrying the row-address and timing control signals that are
@@ -237,9 +241,9 @@ bitfield! {
     #[repr(transparent)]
     struct Address(u8);
     impl Debug;
-    pub output_enable, set_output_enable: 7;
-    pub latch, set_latch: 6;
-    pub addr, set_addr: 4, 0;
+    pub output_enable, set_output_enable: LATCHED_PINMAP.oe;
+    pub latch, set_latch: LATCHED_PINMAP.latch;
+    pub addr, set_addr: LATCHED_PINMAP.addr_msb(), LATCHED_PINMAP.addr_lsb;
 }
 
 impl Address {
@@ -269,14 +273,14 @@ bitfield! {
     #[repr(transparent)]
     struct Entry(u8);
     impl Debug;
-    pub output_enable, set_output_enable: 7;
-    pub latch, set_latch: 6;
-    pub blu2, set_blu2: 5;
-    pub grn2, set_grn2: 4;
-    pub red2, set_red2: 3;
-    pub blu1, set_blu1: 2;
-    pub grn1, set_grn1: 1;
-    pub red1, set_red1: 0;
+    pub output_enable, set_output_enable: LATCHED_PINMAP.oe;
+    pub latch, set_latch: LATCHED_PINMAP.latch;
+    pub blu2, set_blu2: LATCHED_PINMAP.blu1;
+    pub grn2, set_grn2: LATCHED_PINMAP.grn1;
+    pub red2, set_red2: LATCHED_PINMAP.red1;
+    pub blu1, set_blu1: LATCHED_PINMAP.blu0;
+    pub grn1, set_grn1: LATCHED_PINMAP.grn0;
+    pub red1, set_red1: LATCHED_PINMAP.red0;
 }
 
 impl Entry {
@@ -284,18 +288,16 @@ impl Entry {
         Self(0)
     }
 
-    // Optimized color bit manipulation constants and methods
-    const COLOR0_MASK: u8 = 0b0000_0111; // bits 0-2: R1, G1, B1
-    const COLOR1_MASK: u8 = 0b0011_1000; // bits 3-5: R2, G2, B2
-
+    // Optimized color bit manipulation methods. The masks come from
+    // `crate::pinmap::LATCHED_PINMAP` so they follow that layout.
     #[inline]
     fn set_color0_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR0_MASK) | (bits & Self::COLOR0_MASK);
+        self.0 = (self.0 & !LATCHED_COLOR0_MASK) | (bits & LATCHED_COLOR0_MASK);
     }
 
     #[inline]
     fn set_color1_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR1_MASK) | ((bits << 3) & Self::COLOR1_MASK);
+        self.0 = (self.0 & !LATCHED_COLOR1_MASK) | ((bits << 3) & LATCHED_COLOR1_MASK);
     }
 }
 
@@ -340,7 +342,7 @@ const fn make_addr_table() -> [[Address; 4]; 32] {
         while i < 4 {
             let latch = i != 3;
             let mapped_i = map_index(i);
-            let latch_bit = if latch { 1u8 << 6 } else { 0u8 };
+            let latch_bit = if latch { LATCHED_LATCH_BIT } else { 0u8 };
             tbl[addr][mapped_i].0 = OE_BLANK | latch_bit | addr as u8;
             i += 1;
         }
@@ -408,7 +410,7 @@ impl<const COLS: usize> Row<COLS> {
     #[inline]
     pub fn clear_colors(&mut self) {
         // Clear color bits while preserving timing and control bits
-        const COLOR_CLEAR_MASK: u8 = !0b0011_1111; // Clear bits 0-5 (R1,G1,B1,R2,G2,B2)
+        const COLOR_CLEAR_MASK: u8 = !LATCHED_COLOR_MASK; // Clear R1,G1,B1,R2,G2,B2
 
         for entry in &mut self.data {
             entry.0 &= COLOR_CLEAR_MASK;
@@ -571,6 +573,20 @@ impl<
     /// let mut framebuffer = DmaFrameBuffer::<ROWS, COLS, NROWS, BITS, FRAME_COUNT>::new();
     /// // Ready to use immediately
     /// ```
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array of 8-bit words, one per
+    /// pixel clock per frame, for `(2^BITS)-1` frames. Even at 8-bit
+    /// words the frame count grows exponentially with `BITS`, so the
+    /// buffer quickly reaches tens of kilobytes. **Never bind it to a
+    /// task-local `let`** — that places the whole buffer on the task stack
+    /// and overflows it.
+    ///
+    /// The framebuffer is mutable, so give it a `'static` home that hands
+    /// out `&'static mut` **without** `unsafe` — `static mut` is not an
+    /// option. Use `static_cell::StaticCell`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         #[cfg(feature = "esp32-ordering")]
@@ -764,50 +780,6 @@ impl<
             self.set_pixel_internal(pixel.0.x as usize, pixel.0.y as usize, pixel.1);
         }
         Ok(())
-    }
-}
-
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > ReadBuffer for DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    type Word = u8;
-
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
-    }
-}
-
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<
-        const ROWS: usize,
-        const COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-    > ReadBuffer for &mut DmaFrameBuffer<ROWS, COLS, NROWS, BITS, FRAME_COUNT>
-{
-    type Word = u8;
-
-    unsafe fn read_buffer(&self) -> (*const u8, usize) {
-        let ptr = (&raw const self.frames).cast::<u8>();
-        let len = core::mem::size_of_val(&self.frames);
-        (ptr, len)
     }
 }
 
@@ -1566,27 +1538,6 @@ mod tests {
             .into_styled(PrimitiveStyle::with_fill(Color::BLUE))
             .draw(&mut fb);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_read_buffer_implementation() {
-        let fb = TestFrameBuffer::new();
-
-        // Test direct implementation
-        unsafe {
-            let (ptr, len) = fb.read_buffer();
-            assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
-        }
-
-        // Test mutable reference implementation
-        let mut fb = TestFrameBuffer::new();
-        let fb_ref = &mut fb;
-        unsafe {
-            let (ptr, len) = fb_ref.read_buffer();
-            assert!(!ptr.is_null());
-            assert_eq!(len, core::mem::size_of_val(&fb.frames));
-        }
     }
 
     #[test]

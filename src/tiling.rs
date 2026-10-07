@@ -19,10 +19,9 @@ use crate::{
     BcmLenReps, Color, FrameBuffer, FrameBufferOperations, MutableFrameBuffer,
     BCM_SEQUENCE_CAPACITY,
 };
-use embedded_dma::ReadBuffer;
 use embedded_graphics::prelude::{DrawTarget, OriginDimensions, PixelColor, Point, Size};
 
-/// Computes the number of columns needed if the displays are bing tiled together.
+/// Computes the number of columns needed if the displays are being tiled together.
 /// # Arguments
 ///
 /// * `cols` - Number of columns per panel
@@ -549,45 +548,6 @@ impl<
 }
 
 #[allow(deprecated)]
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<
-        T,
-        F: ReadBuffer<Word = T>,
-        M: PixelRemapper,
-        const PANEL_ROWS: usize,
-        const PANEL_COLS: usize,
-        const NROWS: usize,
-        const BITS: u8,
-        const FRAME_COUNT: usize,
-        const TILE_ROWS: usize,
-        const TILE_COLS: usize,
-        const FB_COLS: usize,
-    > ReadBuffer
-    for TiledFrameBuffer<
-        F,
-        M,
-        PANEL_ROWS,
-        PANEL_COLS,
-        NROWS,
-        BITS,
-        FRAME_COUNT,
-        TILE_ROWS,
-        TILE_COLS,
-        FB_COLS,
-    >
-{
-    type Word = T;
-
-    unsafe fn read_buffer(&self) -> (*const T, usize) {
-        self.0.read_buffer()
-    }
-}
-
-#[allow(deprecated)]
 impl<
         F: FrameBuffer,
         M: PixelRemapper,
@@ -802,19 +762,6 @@ impl<F: FrameBufferOperations + FrameBuffer, M: PixelRemapper> FrameBufferOperat
     #[inline]
     fn set_pixel(&mut self, p: Point, color: Color) {
         self.0.set_pixel(M::remap_point(p), color);
-    }
-}
-
-///
-/// # Deprecated
-///
-/// This implementation is deprecated since 0.11.0. The driver now uses `BcmSegment`
-/// pointers instead of `ReadBuffer` for DMA transfers.
-unsafe impl<T, F: ReadBuffer<Word = T>, M: PixelRemapper> ReadBuffer for RemappedFrameBuffer<F, M> {
-    type Word = T;
-
-    unsafe fn read_buffer(&self) -> (*const T, usize) {
-        self.0.read_buffer()
     }
 }
 
@@ -1095,15 +1042,6 @@ mod tests {
 
     impl MutableFrameBuffer for TestFrameBuffer {}
 
-    #[allow(deprecated)]
-    unsafe impl embedded_dma::ReadBuffer for TestFrameBuffer {
-        type Word = u8;
-
-        unsafe fn read_buffer(&self) -> (*const u8, usize) {
-            (self.buf.as_ptr(), self.buf.len())
-        }
-    }
-
     #[test]
     #[allow(deprecated)]
     fn test_tiled_draw_iter_forwards_with_remap() {
@@ -1264,36 +1202,6 @@ mod tests {
             }
             _ => panic!("expected a Draw call"),
         }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_tiled_read_buffer_passthrough() {
-        const TILED_COLS: usize = 2;
-        const TILED_ROWS: usize = 2;
-        const ROWS: usize = 32;
-        const PANEL_COLS: usize = 64;
-        const FB_COLS: usize = compute_tiled_cols(PANEL_COLS, TILED_ROWS, TILED_COLS);
-
-        let fb = TiledFrameBuffer::<
-            TestFrameBuffer,
-            ChainTopRightDown<ROWS, PANEL_COLS, TILED_ROWS, TILED_COLS>,
-            ROWS,
-            PANEL_COLS,
-            { crate::compute_rows(ROWS) },
-            2,
-            { crate::compute_frame_count(2) },
-            TILED_ROWS,
-            TILED_COLS,
-            FB_COLS,
-        >(TestFrameBuffer::new(), core::marker::PhantomData);
-
-        let inner_ptr = fb.0.buf.as_ptr();
-        let inner_len = fb.0.buf.len();
-
-        let (ptr, len) = unsafe { fb.read_buffer() };
-        assert_eq!(ptr, inner_ptr);
-        assert_eq!(len, inner_len);
     }
 
     // Remapper that generates very large coordinates to trigger u16 truncation in remap_point
@@ -1623,21 +1531,6 @@ mod tests {
             }
             _ => panic!("expected a Draw call"),
         }
-    }
-
-    #[test]
-    fn test_remapped_read_buffer_passthrough() {
-        let fb = RemappedFrameBuffer::<TestFrameBuffer, ChainTopRightDown<32, 64, 2, 2>>(
-            TestFrameBuffer::new(),
-            core::marker::PhantomData,
-        );
-
-        let inner_ptr = fb.0.buf.as_ptr();
-        let inner_len = fb.0.buf.len();
-
-        let (ptr, len) = unsafe { fb.read_buffer() };
-        assert_eq!(ptr, inner_ptr);
-        assert_eq!(len, inner_len);
     }
 
     #[test]
