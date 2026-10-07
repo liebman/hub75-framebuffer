@@ -193,7 +193,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["skip-black-pixels"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["skip-black-pixels"] }
 //! ```
 //!
 //! ### `esp32-ordering` Feature (required for original ESP32 only)
@@ -205,7 +205,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["esp32-ordering"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["esp32-ordering"] }
 //! ```
 //!
 //! ### `interstate75` Feature (Pimoroni Interstate 75 / 75 W only)
@@ -227,7 +227,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["interstate75"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["interstate75"] }
 //! ```
 //!
 //! ### `tail-closes-latch` Feature (plain framebuffers only)
@@ -246,7 +246,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["tail-closes-latch"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["tail-closes-latch"] }
 //! ```
 //!
 //! ### `reverse-row-order` Feature (disabled by default)
@@ -259,7 +259,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["reverse-row-order"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["reverse-row-order"] }
 //! ```
 //!
 //! ### Blanking delay features (`lead-blank-*` / `trail-blank-*`)
@@ -293,7 +293,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["lead-blank-4", "trail-blank-2"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["lead-blank-4", "trail-blank-2"] }
 //! ```
 //!
 //! **Note:** At most one `lead-blank-*` and one `trail-blank-*` feature may be
@@ -326,7 +326,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! hub75-framebuffer = { version = "0.12.0", features = ["inter-row-blank-8"] }
+//! hub75-framebuffer = { version = "0.13.0", features = ["inter-row-blank-8"] }
 //! ```
 //!
 //! **Note:** At most one `inter-row-blank-*` feature may be enabled at a time.
