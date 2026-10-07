@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - ReleaseDate
 
+### Changed
+
+* Minimum supported Rust version is now **1.95** (previously 1.86). The
+  board-specific HUB75 bit layout in `src/pinmap.rs` is selected with the
+  newly stabilised `core::cfg_select!` macro.
+
+* The per-board HUB75 signal→bit table in `src/pinmap.rs` is now the single
+  source of truth: the `bitfield!` definitions for every framebuffer
+  (`plain`, `bitplane::plain`, `latched` and `bitplane::latched`) read their
+  bit positions straight from `pinmap::PINMAP` / `pinmap::LATCHED_PINMAP`
+  instead of hard-coded literals, so the accessors can no longer drift out of
+  sync with the DMA templates.
+
+### Added
+
+* New public `pinmap` module exporting a `PinMap` struct along with the
+  `PINMAP` (16-bit) and `LATCHED_PINMAP` (8-bit) constants, so a driver crate
+  can validate at compile time that its own board wiring matches the bit
+  assignments this crate assumes, e.g.
+  `const _: () = assert!(hub75_framebuffer::pinmap::PINMAP.oe == 8);`.
+
+* New `interstate75` feature selecting the Pimoroni Interstate 75 / 75 W
+  (RP2040/RP2350) 16-bit pin layout for the `plain` and `bitplane::plain`
+  framebuffers: `R0 G0 B0 R1 G1 B1` on bits 0-5, row address `A..E` on bits
+  6-10, the clock slot reserved on bit 11, `LAT` on bit 12 and `OE` on bit 13.
+  This matches the board's contiguous GPIO mapping (`GPIO0..GPIO13`) so the
+  PIO can stream the buffer unmodified. Mutually exclusive with
+  `esp32-ordering`. No effect on the 8-bit `latched` framebuffers.
+
+### Removed
+
+* The deprecated `embedded_dma::ReadBuffer` implementations on every
+  framebuffer (`plain`, `latched`, `bitplane::plain`, `bitplane::latched`,
+  `TiledFrameBuffer` and `RemappedFrameBuffer`) have been removed, along with
+  the `embedded-dma` dependency. They were deprecated since 0.11.0 in favour
+  of the `FrameBuffer::bcm_segment` / `bcm_segment_ptr` API. Downstream
+  drivers should use `bcm_segment` (or `BCM_SEQUENCE` +
+  `bcm_segment_ptr`) to obtain DMA source pointers.
+
 ## [0.12.0] - 2026-08-26
 
 ### ⚠️ Breaking

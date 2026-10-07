@@ -28,6 +28,13 @@ jobs:
           - "esp32-ordering"
           - "tail-closes-latch"
           - "esp32-ordering,tail-closes-latch"
+          - "interstate75"
+          - "interstate75,tail-closes-latch"
+          - "interstate75,invert-oe"
+          - "interstate75,inter-row-blank-8"
+          - "interstate75,reverse-row-order"
+          - "interstate75,lead-blank-4,trail-blank-16"
+          - "interstate75,skip-black-pixels"
           - "skip-black-pixels"
           - "reverse-row-order"
           - "reverse-row-order,esp32-ordering"
@@ -47,6 +54,31 @@ jobs:
       - name: Run tests
         run: cargo test --verbose --no-default-features --features "${{ matrix.features }}"
 
+  # Minimum supported Rust version. `core::cfg_select!` (used to select the
+  # board bit layout in src/pinmap.rs) was stabilised in 1.95.
+  msrv:
+    name: MSRV (1.95)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (default layout)
+        run: cargo build --verbose --no-default-features
+
+      - name: Build (interstate75)
+        run: cargo build --verbose --no-default-features --features interstate75
+
+      - name: Run tests (interstate75)
+        run: cargo test --verbose --no-default-features --features interstate75
+
   # Additional checks
   clippy:
     name: Clippy
@@ -64,6 +96,9 @@ jobs:
       
       - name: Run clippy
         run: cargo clippy -F defmt -- -D warnings
+
+      - name: Run clippy (interstate75)
+        run: cargo clippy --no-default-features -F interstate75 -- -D warnings
 
   # Formatting check
   fmt:

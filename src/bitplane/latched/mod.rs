@@ -83,17 +83,20 @@ pub mod row;
 
 pub use frame::DmaFrameBuffer;
 
+pub(crate) use crate::pinmap::{
+    LATCHED_COLOR0_MASK, LATCHED_COLOR1_MASK, LATCHED_LATCH_BIT, LATCHED_OE_BIT, LATCHED_PINMAP,
+};
 pub(crate) use crate::{INTER_ROW_BLANK, LEAD_BLANK_DELAY, TRAIL_BLANK_DELAY};
 
 #[cfg(not(feature = "invert-oe"))]
-pub(crate) const OE_ACTIVE: u8 = 0b1000_0000;
+pub(crate) const OE_ACTIVE: u8 = LATCHED_OE_BIT;
 #[cfg(not(feature = "invert-oe"))]
 pub(crate) const OE_BLANK: u8 = 0;
 
 #[cfg(feature = "invert-oe")]
 pub(crate) const OE_ACTIVE: u8 = 0;
 #[cfg(feature = "invert-oe")]
-pub(crate) const OE_BLANK: u8 = 0b1000_0000;
+pub(crate) const OE_BLANK: u8 = LATCHED_OE_BIT;
 
 // ---------------------------------------------------------------------------
 // Address / Entry — the 8-bit words that ride on the HUB75 bus
@@ -104,9 +107,9 @@ bitfield! {
     #[repr(transparent)]
     pub(crate) struct Address(u8);
     impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) addr, set_addr: 4, 0;
+    pub(crate) output_enable, set_output_enable: LATCHED_PINMAP.oe;
+    pub(crate) latch, set_latch: LATCHED_PINMAP.latch;
+    pub(crate) addr, set_addr: LATCHED_PINMAP.addr_msb(), LATCHED_PINMAP.addr_lsb;
 }
 
 impl Address {
@@ -120,14 +123,14 @@ bitfield! {
     #[repr(transparent)]
     pub(crate) struct Entry(u8);
     impl Debug;
-    pub(crate) output_enable, set_output_enable: 7;
-    pub(crate) latch, set_latch: 6;
-    pub(crate) blu2, set_blu2: 5;
-    pub(crate) grn2, set_grn2: 4;
-    pub(crate) red2, set_red2: 3;
-    pub(crate) blu1, set_blu1: 2;
-    pub(crate) grn1, set_grn1: 1;
-    pub(crate) red1, set_red1: 0;
+    pub(crate) output_enable, set_output_enable: LATCHED_PINMAP.oe;
+    pub(crate) latch, set_latch: LATCHED_PINMAP.latch;
+    pub(crate) blu2, set_blu2: LATCHED_PINMAP.blu1;
+    pub(crate) grn2, set_grn2: LATCHED_PINMAP.grn1;
+    pub(crate) red2, set_red2: LATCHED_PINMAP.red1;
+    pub(crate) blu1, set_blu1: LATCHED_PINMAP.blu0;
+    pub(crate) grn1, set_grn1: LATCHED_PINMAP.grn0;
+    pub(crate) red1, set_red1: LATCHED_PINMAP.red0;
 }
 
 impl Entry {
@@ -135,17 +138,15 @@ impl Entry {
         Self(0)
     }
 
-    const COLOR0_MASK: u8 = 0b0000_0111;
-    const COLOR1_MASK: u8 = 0b0011_1000;
-
+    // The masks come from `crate::pinmap::LATCHED_PINMAP`.
     #[inline]
     fn set_color0_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR0_MASK) | (bits & Self::COLOR0_MASK);
+        self.0 = (self.0 & !LATCHED_COLOR0_MASK) | (bits & LATCHED_COLOR0_MASK);
     }
 
     #[inline]
     fn set_color1_bits(&mut self, bits: u8) {
-        self.0 = (self.0 & !Self::COLOR1_MASK) | ((bits << 3) & Self::COLOR1_MASK);
+        self.0 = (self.0 & !LATCHED_COLOR1_MASK) | ((bits << 3) & LATCHED_COLOR1_MASK);
     }
 }
 
@@ -169,8 +170,8 @@ pub(crate) const fn make_addr_table() -> [[Address; 4]; 32] {
     let mut tbl = [[Address::new(); 4]; 32];
     let mut addr = 0;
     while addr < 32 {
-        tbl[addr][map_index(0)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
-        tbl[addr][map_index(1)].0 = OE_BLANK | 1u8 << 6 | addr as u8;
+        tbl[addr][map_index(0)].0 = OE_BLANK | LATCHED_LATCH_BIT | addr as u8;
+        tbl[addr][map_index(1)].0 = OE_BLANK | LATCHED_LATCH_BIT | addr as u8;
         tbl[addr][map_index(2)].0 = OE_BLANK | addr as u8;
         tbl[addr][map_index(3)].0 = OE_BLANK;
         addr += 1;

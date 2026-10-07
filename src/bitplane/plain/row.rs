@@ -122,7 +122,8 @@ use crate::{BcmLenReps, FrameBuffer, BCM_SEQUENCE_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
 use super::{
-    map_index, Entry, INTER_ROW_BLANK, LEAD_BLANK_DELAY, OE_ACTIVE, OE_BLANK, TRAIL_BLANK_DELAY,
+    map_index, Entry, ADDR_SHIFT, COLOR_MASK, INTER_ROW_BLANK, LATCH_BIT, LEAD_BLANK_DELAY,
+    OE_ACTIVE, OE_BLANK, TRAIL_BLANK_DELAY,
 };
 
 /// One bit-plane's pixel data for a single row.
@@ -241,9 +242,9 @@ const fn make_row_plane_template<const COLS: usize>(
             || (lead_blank && i >= COLS.saturating_sub(LEAD_BLANK_DELAY + 1));
 
         let oe = if blanked { OE_BLANK } else { OE_ACTIVE };
-        let mut val = addr as u16 | oe;
+        let mut val = ((addr as u16) << ADDR_SHIFT) | oe;
         if is_last {
-            val |= 0b0010_0000; // latch
+            val |= LATCH_BIT;
         }
 
         data[map_index(i)] = Entry::from_raw(val);
@@ -370,7 +371,7 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
         // first pixel instead.
         #[cfg(feature = "inter-row-blank")]
         {
-            let gap_entry = Entry::from_raw(prev_addr as u16 | OE_BLANK);
+            let gap_entry = Entry::from_raw(((prev_addr as u16) << ADDR_SHIFT) | OE_BLANK);
             let mut i = 0;
             while i < INTER_ROW_BLANK {
                 self.gap[i] = gap_entry;
@@ -380,8 +381,8 @@ impl<const COLS: usize, const PLANES: usize> RowData<COLS, PLANES> {
 
         #[cfg(feature = "tail-closes-latch")]
         {
-            self.tail = Entry::from_raw(addr as u16 | OE_BLANK);
-            self.padding = Entry::from_raw(addr as u16 | OE_BLANK);
+            self.tail = Entry::from_raw(((addr as u16) << ADDR_SHIFT) | OE_BLANK);
+            self.padding = Entry::from_raw(((addr as u16) << ADDR_SHIFT) | OE_BLANK);
         }
     }
 }
@@ -412,6 +413,16 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// `esp32-ordering` feature, also panics if `COLS` is not even (the
     /// ESP32's byte-order swap requires an even column count). In const
     /// contexts (e.g. `static` framebuffers) this is a compile-time error.
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array (roughly
+    /// `PLANES × NROWS × (COLS + gap) × 2` bytes). A 64×64 panel at
+    /// `PLANES = 8` is tens of kilobytes, which will overflow a task stack if
+    /// bound to a local `let`. The framebuffer is mutable, so give it a
+    /// `'static` home that hands out `&'static mut` (e.g.
+    /// `static_cell::StaticCell`) — never `static mut`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
@@ -475,7 +486,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// Erase pixel colours while preserving row control data.
     #[inline]
     pub fn erase(&mut self) {
-        const MASK: u16 = !0b0111_1110_0000_0000; // clear bits 9-14
+        const MASK: u16 = !COLOR_MASK; // clear the colour bits
         for row in &mut self.rows {
             for p in 0..PLANES {
                 for entry in &mut row.plane_mut(p).data {
@@ -719,7 +730,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize> DrawTarget
 mod tests {
     extern crate std;
 
-    use super::super::{LEAD_BLANK_DELAY, OE_ACTIVE, TRAIL_BLANK_DELAY};
+    use super::super::{LEAD_BLANK_DELAY, OE_ACTIVE, OE_BIT, TRAIL_BLANK_DELAY};
     use super::*;
     use embedded_graphics::prelude::*;
     use std::format;
@@ -1137,7 +1148,7 @@ mod tests {
                     "gap entry should hold prev_addr at slot {slot}"
                 );
                 assert_eq!(
-                    entry.0 & 0b1_0000_0000,
+                    entry.0 & OE_BIT,
                     OE_BLANK,
                     "gap entry should have OE blank at slot {slot}"
                 );
@@ -1673,18 +1684,10 @@ mod tests {
             assert_eq!(entry.addr(), 5);
             if i == TEST_COLS - 1 {
                 assert!(entry.latch(), "last entry must latch");
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_BLANK,
-                    "latch should be OE blank"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_BLANK, "latch should be OE blank");
             } else {
                 assert!(!entry.latch(), "col {i} must not latch");
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_ACTIVE,
-                    "col {i} should be OE active"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_ACTIVE, "col {i} should be OE active");
             }
         }
     }
@@ -1695,17 +1698,9 @@ mod tests {
         for i in 0..TEST_COLS {
             let entry = t[map_index(i)];
             if i < TRAIL_BLANK_DELAY || i == TEST_COLS - 1 {
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_BLANK,
-                    "col {i} should be OE blank"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_BLANK, "col {i} should be OE blank");
             } else {
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_ACTIVE,
-                    "col {i} should be OE active"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_ACTIVE, "col {i} should be OE active");
             }
         }
     }
@@ -1716,18 +1711,32 @@ mod tests {
         for i in 0..TEST_COLS {
             let entry = t[map_index(i)];
             if i >= TEST_COLS.saturating_sub(LEAD_BLANK_DELAY + 1) {
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_BLANK,
-                    "col {i} should be lead blank"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_BLANK, "col {i} should be lead blank");
             } else {
-                assert_eq!(
-                    entry.0 & 0b1_0000_0000,
-                    OE_ACTIVE,
-                    "col {i} should be OE active"
-                );
+                assert_eq!(entry.0 & OE_BIT, OE_ACTIVE, "col {i} should be OE active");
             }
         }
+    }
+
+    /// Bit-exact check of the Interstate 75 W word layout for the bitplane
+    /// framebuffer (same format as `plain`): `R0 G0 B0 R1 G1 B1 A B C D E -
+    /// LAT OE` on bits 0..13, with the unused bit 11 parked at 0.
+    #[cfg(feature = "interstate75")]
+    #[test]
+    fn interstate75_entry_layout() {
+        // `new()` blanks the panel: the OE bit must be at bit 13.
+        let blanked = Entry::new();
+        assert_eq!(blanked.raw() & OE_BIT, OE_BLANK);
+        assert_eq!(blanked.raw(), OE_BLANK);
+
+        let mut e = Entry::new();
+        e.set_color0_bits(0b101); // R0 + B0
+        e.set_color1_bits(0b110); // G1 + B1
+        e.set_addr(0b1_0101); // A..E → bits 6..10
+        e.set_latch(true); // LAT → bit 12
+
+        let expected = 0b101u16 | (0b110 << 3) | (0b1_0101 << 6) | (1 << 12) | OE_BLANK;
+        assert_eq!(e.raw(), expected);
+        assert_eq!(e.raw() & (1 << 11), 0, "unused bit 11 must stay 0");
     }
 }

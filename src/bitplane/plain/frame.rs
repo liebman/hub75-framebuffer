@@ -42,7 +42,11 @@ use crate::{map_row_index, slot_addresses};
 use crate::{BcmLenReps, FrameBuffer, BCM_SEQUENCE_CAPACITY};
 use crate::{FrameBufferOperations, MutableFrameBuffer};
 
-use super::{make_data_template, map_index, Entry, INTER_ROW_BLANK, OE_BLANK};
+#[cfg(feature = "tail-closes-latch")]
+use super::ADDR_MASK;
+use super::{
+    make_data_template, map_index, Entry, ADDR_SHIFT, COLOR_MASK, INTER_ROW_BLANK, OE_BLANK,
+};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
@@ -84,7 +88,7 @@ impl<const COLS: usize> Row<COLS> {
             i += 1;
         }
 
-        let gap_val = (prev_addr as u16) | OE_BLANK;
+        let gap_val = ((prev_addr as u16) << ADDR_SHIFT) | OE_BLANK;
         let mut i = 0;
         // INTER_ROW_BLANK is 0 unless an inter-row-blank-* feature is enabled.
         #[allow(clippy::absurd_extreme_comparisons)]
@@ -181,6 +185,16 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// `esp32-ordering` feature, also panics if `COLS` is not even (the
     /// ESP32's byte-order swap requires an even column count). In const
     /// contexts (e.g. `static` framebuffers) this is a compile-time error.
+    ///
+    /// # Memory placement (⚠️ large buffer)
+    ///
+    /// This framebuffer is a large inline array (roughly
+    /// `PLANES × NROWS × (COLS + gap) × 2` bytes). A 64×64 panel at
+    /// `PLANES = 8` is tens of kilobytes, which will overflow a task stack if
+    /// bound to a local `let`. The framebuffer is mutable, so give it a
+    /// `'static` home that hands out `&'static mut` (e.g.
+    /// `static_cell::StaticCell`) — never `static mut`. See the crate-level
+    /// **Memory placement** section for a worked example.
     #[must_use]
     pub const fn new() -> Self {
         assert!(NROWS >= 1 && NROWS <= 32, "NROWS must be within 1..=32");
@@ -224,8 +238,8 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
             }
             #[cfg(feature = "tail-closes-latch")]
             {
-                self.planes[p].tail.0 = 0x1f | OE_BLANK;
-                self.planes[p].padding.0 = 0x1f | OE_BLANK;
+                self.planes[p].tail.0 = ADDR_MASK | OE_BLANK;
+                self.planes[p].padding.0 = ADDR_MASK | OE_BLANK;
             }
             p += 1;
         }
@@ -234,7 +248,7 @@ impl<const NROWS: usize, const COLS: usize, const PLANES: usize>
     /// Erase pixel colors while preserving row control data.
     #[inline]
     pub fn erase(&mut self) {
-        const MASK: u16 = !0b0111_1110_0000_0000; // clear bits 9-14 (R1,G1,B1,R2,G2,B2)
+        const MASK: u16 = !COLOR_MASK; // clear the colour bits
         for plane in &mut self.planes {
             for row in &mut plane.rows {
                 for entry in &mut row.data {
